@@ -156,7 +156,7 @@ class UniformLineDataset:
         rng = jax.random.PRNGKey(42)
         while True:
             rng, sample_key = jax.random.split(rng, 2)
-            yield UniformLineDataset._sample(sample_key, self.size, self.src_mean, self.tgt_mean)
+            yield UniformLineDataset._sample(sample_key, self.size)
 
     @staticmethod
     @partial(jax.jit, static_argnums=1)
@@ -207,21 +207,35 @@ class Gaussian:
             yield {"src_lin": source_samples, 'tgt_lin': target_samples}
             
 def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
-  if geometry_str == "gsb_babymaze":
-    variance = 0.2
-    source_mean = jnp.array([-1.5, 0.0])
-    target_mean = jnp.array([1.5, 0.0])
-  elif geometry_str == "gsb_vneck":
+  if geometry_str == "babymaze":
+    return UniformLineDataset(size=batch_size)
+    # variance = 0.1
+    # source_mean = jnp.array([-1.5, 0.5])
+    # target_mean = jnp.array([1.5, -0.0])
+    
+  elif geometry_str == "box":
+    return UniformLineDataset(size=batch_size)
+  
+  elif geometry_str == "vneck":
     variance = 0.15
     source_mean = jnp.array([-2.5, 0.0])
     target_mean = jnp.array([2.5, 0.0])
-  elif geometry_str == "gsb_pipe":
+  
+  elif geometry_str == "slit":
+    return UniformLineDataset(size=batch_size)
+    # variance = 0.1
+    # source_mean = jnp.array([-1.0, 0.0])
+    # target_mean = jnp.array([1.0, 0.0])
+  
+  elif geometry_str == "pipe":
     variance = 0.1
     source_mean = jnp.array([-1.0, 0.0])
     target_mean = jnp.array([1.0, 0.0])
-  elif geometry_str == "gsb_stunnel":
+    
+  elif geometry_str == "stunnel":
     variance = 0.5
     source_mean = jnp.array([-11.0, -1.0])
     target_mean = jnp.array([11.0, -1.0])
+    
   return Gaussian(source_mean=source_mean, source_var=variance,
                   target_mean=target_mean, target_var=variance, batch_size=batch_size, init_key=key)

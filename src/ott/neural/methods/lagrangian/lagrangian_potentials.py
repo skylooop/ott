@@ -1,9 +1,12 @@
 from abc import abstractmethod
 import jax.numpy as jnp
+import jax
 from jax import nn
 import numpy as np
-from datasets import create_lsb_line_sampler, create_gsb
+from ott.datasets import create_lagrangian_ds
 
+import functools
+from dataclasses import dataclass
 from flax.struct import PyTreeNode
 
 class LagrangianPotentialBase(PyTreeNode):
@@ -42,20 +45,20 @@ class LagrangianPotentialBase(PyTreeNode):
     def get_boundaries(self):
         return jnp.linspace(self.x_axes_bounds[0] * self.scale, self.x_axes_bounds[1] * self.scale, num=200), \
             jnp.linspace(self.y_axes_bounds[0] * self.scale, self.y_axes_bounds[1] * self.scale, num=200)
-    
-# https://github.com/take-koshizuka/NLSB/blob/main/models/potential_2d.py
+            
 class BoxPotential(LagrangianPotentialBase):
     xmin: float = -0.5
     xmax: float = 0.5
     ymin: float = -0.5
     ymax: float = 0.5
-    
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box', key=None)
+
     def get_boundaries(self):
         return jnp.linspace(self.x_axes_bounds[0] * self.scale, self.x_axes_bounds[1] * self.scale), \
             jnp.linspace(self.y_axes_bounds[0] * self.scale, self.y_axes_bounds[1] * self.scale)
     
     def get_samples(self, size):
-        box_sampler = create_lsb_line_sampler(batch_size=size, scale=self.scale)
+        box_sampler = self.sampler_func(batch_size=size)
         sampler = next(iter(box_sampler))
         source_data = sampler['src_lin']
         target_data = sampler['tgt_lin']
@@ -67,8 +70,8 @@ class BoxPotential(LagrangianPotentialBase):
               nn.sigmoid((x[0] - self.xmax) / self.temp))
         Uy = (nn.sigmoid((x[1] - self.ymin) / self.temp) - \
               nn.sigmoid((x[1] - self.ymax) / self.temp))
-        U = -Ux * Uy
-        return self.M * U
+        U = Ux * Uy
+        return -self.M * U
 
 
 class Styblinski_tan(LagrangianPotentialBase):
@@ -87,10 +90,11 @@ class SlitPotential(LagrangianPotentialBase):
 
     x_axes_bounds = (-1.5, 1.5)
     y_axes_bounds = (-2., 2.)
-    
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='slit')
+
     def get_samples(self, size, key):
-        box_sampler = create_gsb("gsb_vneck", batch_size=size, key=key)
-        sampler = next(iter(box_sampler))
+        vneck_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(vneck_sampler))
         source_data = sampler['src_lin']
         target_data = sampler['tgt_lin']
         return source_data, target_data
@@ -117,10 +121,11 @@ class BabyMazePotential(LagrangianPotentialBase):
 
     x_axes_bounds = (-2.5, 2.5)
     y_axes_bounds = (-2.5, 2.5)
-    
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze')
+
     def get_samples(self, size, key):
-        box_sampler = create_gsb("gsb_babymaze", batch_size=size, key=key)
-        sampler = next(iter(box_sampler))
+        maze_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(maze_sampler))
         source_data = sampler['src_lin']
         target_data = sampler['tgt_lin']
         return source_data, target_data
@@ -180,8 +185,10 @@ class VNeck_Potential(LagrangianPotentialBase):
     x_axes_bounds = (-3., 3.)
     y_axes_bounds = (-5., 5.)
     
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck')
+    
     def get_samples(self, size, key):
-        box_sampler = create_gsb("gsb_vneck", batch_size=size, key=key)
+        box_sampler = self.sampler_func(batch_size=size, key=key)
         sampler = next(iter(box_sampler))
         source_data = sampler['src_lin']
         target_data = sampler['tgt_lin']

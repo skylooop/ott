@@ -31,9 +31,10 @@ class BaseFlow(abc.ABC):
     sigma: Noise used for computing time-dependent noise schedule.
   """
 
-  def __init__(self, sigma: float):
+  def __init__(self, sigma: float, potential = None):
     self.sigma = sigma
-
+    self.potential = potential
+      
   @abc.abstractmethod
   def compute_mu_t(
       self, t: jnp.ndarray, x0: jnp.ndarray, x1: jnp.ndarray
@@ -80,7 +81,7 @@ class BaseFlow(abc.ABC):
     """
 
   def compute_xt(
-      self, rng: jax.Array, t: jnp.ndarray, x0: jnp.ndarray, x1: jnp.ndarray
+      self, rng: jax.Array, t: jnp.ndarray, x0: jnp.ndarray, x1: jnp.ndarray, correction_model=None
   ) -> jnp.ndarray:
     """Sample from the probability path.
 
@@ -98,7 +99,7 @@ class BaseFlow(abc.ABC):
       at time :math:`t`.
     """
     noise = jax.random.normal(rng, shape=x0.shape)
-    mu_t = self.compute_mu_t(t, x0, x1)
+    mu_t = self.compute_mu_t(t, x0, x1, correction_model)
     sigma_t = self.compute_sigma_t(t)
     return mu_t + sigma_t * noise
 
@@ -181,3 +182,22 @@ class BrownianBridge(StraightFlow):
     drift_term = (1 - 2 * t) / (2 * t * (1 - t)) * (x - (t * x1 + (1 - t) * x0))
     control_term = x1 - x0
     return drift_term + control_term
+  
+class LagrangianFlow(StraightFlow):
+
+  def compute_mu_t(  # noqa: D102
+      self, t: jnp.ndarray, src: jnp.ndarray, tgt: jnp.ndarray, correction_model
+  ) -> jnp.ndarray:
+    x_t = (1.0 - t) * src + t * tgt  
+    return x_t + t * (1 - t) * correction_model(t, src, tgt)
+
+  def compute_sigma_t(self, t: jnp.ndarray) -> jnp.ndarray:
+    return self.sigma * jnp.sqrt(t * (1 - t))
+
+  def compute_inverse_control_matrix(self, t: jnp.ndarray, x_t: jnp.ndarray) -> jnp.ndarray:
+    return jnp.eye(x_t.shape[-1], x_t.shape[-1])
+
+  def compute_potential(self, t: jnp.ndarray, x_t: jnp.ndarray) -> jnp.ndarray:
+    if self.potential is not None:
+      return jax.vmap(self.potential)(x_t)
+    return 0
