@@ -13,6 +13,7 @@
 # limitations under the License.
 import dataclasses
 from typing import Iterator, Literal, NamedTuple, Optional, Tuple
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -144,3 +145,83 @@ def create_gaussian_mixture_samplers(
   )
   dim_data = 2
   return train_dataset, valid_dataset, dim_data
+
+class UniformLineDataset:
+    def __init__(self, size):#, src_mean, tgt_mean):
+        self.size = size
+        # self.src_mean = src_mean
+        # self.tgt_mean = tgt_mean
+        
+    def __iter__(self):
+        rng = jax.random.PRNGKey(42)
+        while True:
+            rng, sample_key = jax.random.split(rng, 2)
+            yield UniformLineDataset._sample(sample_key, self.size, self.src_mean, self.tgt_mean)
+
+    @staticmethod
+    @partial(jax.jit, static_argnums=1)
+    def _sample(key, batch_size):
+        k1, k2, key = jax.random.split(key, 3)
+        x1 = jax.random.uniform(k1, (batch_size, 1), minval=-1.25, maxval=-1.0)
+        x2 = jax.random.uniform(k2, (batch_size, 1), minval=-1.0, maxval=1.0)
+        x_0 = jnp.concatenate([x1, x2], axis=1)
+        
+        k1, k2, key = jax.random.split(key, 3)
+        x1 = jax.random.uniform(k1, (batch_size, 1), minval=1, maxval=1.25)
+        x2 = jax.random.uniform(k2, (batch_size, 1), minval=-1.0, maxval=1.0)
+        x_1 = jnp.concatenate([x1, x2], axis=1)
+
+        return {
+            "src_lin": x_0,
+            "tgt_lin": x_1
+        }
+
+@dataclasses.dataclass
+class Gaussian:
+    source_mean: float
+    source_var: float
+
+    target_mean: float
+    target_var: float
+
+    batch_size: int
+    init_key: jax.random.PRNGKey
+
+    def __iter__(self) -> Iterator[jnp.array]:
+        """Random sample generator from Gaussian mixture.
+        Returns:
+        A generator of samples from the Gaussian mixture.
+        """
+        return self._create_sample_generators()
+
+    def _create_sample_generators(self) -> Iterator[jnp.array]:
+        key = self.init_key
+        while True:
+            key1, key2, key = jax.random.split(key, 3)
+            source_normal_samples = jax.random.normal(key1, [self.batch_size, 2])
+            source_samples = self.source_mean + self.source_var * source_normal_samples
+
+            target_normal_samples = jax.random.normal(key2, [self.batch_size, 2])
+            target_samples = self.target_mean + self.target_var * target_normal_samples
+
+            yield {"src_lin": source_samples, 'tgt_lin': target_samples}
+            
+def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
+  if geometry_str == "gsb_babymaze":
+    variance = 0.2
+    source_mean = jnp.array([-1.5, 0.0])
+    target_mean = jnp.array([1.5, 0.0])
+  elif geometry_str == "gsb_vneck":
+    variance = 0.15
+    source_mean = jnp.array([-2.5, 0.0])
+    target_mean = jnp.array([2.5, 0.0])
+  elif geometry_str == "gsb_pipe":
+    variance = 0.1
+    source_mean = jnp.array([-1.0, 0.0])
+    target_mean = jnp.array([1.0, 0.0])
+  elif geometry_str == "gsb_stunnel":
+    variance = 0.5
+    source_mean = jnp.array([-11.0, -1.0])
+    target_mean = jnp.array([11.0, -1.0])
+  return Gaussian(source_mean=source_mean, source_var=variance,
+                  target_mean=target_mean, target_var=variance, batch_size=batch_size, init_key=key)
