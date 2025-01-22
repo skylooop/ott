@@ -258,7 +258,7 @@ class NeuralOC:
       # src_cond = batch.get("src_condition")
       it_key = jax.random.fold_in(loop_key, it)
 
-      if it > 10_000:
+      if it > 10_000 and it % 2 == 0:
           x_sample = self.buffer[np.random.randint(0, self.buffer_size, src.shape[0])]
           self.state, loss, loss_potential, x_seq = self.train_step_cost(self.state, it_key, src, tgt, x_sample)
       else:
