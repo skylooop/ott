@@ -22,10 +22,10 @@ __all__ = ["GSBM"]
 
 Callback_t = Callable[[int, ], None]
 
-def linear_interp1d(t, xt: Float[ArrayLike, "T B D"], mask, query_t):
-    t: Float[ArrayLike, "T B"] = jnp.repeat(jnp.linspace(0, 1, xt.shape[0]), repeats=xt.shape[1], axis=-1)
-    velocities = (xt[1:] - xt[:-1]) / (t[1:] - t[:-1]) + 1e-10
-    left = jnp.searchsorted(t[1:].T.ravel(), query_t.T.ravel(), side='left').T
+def linear_interp1d(t: Float[ArrayLike, "discr_means_t B"], xt: Float[ArrayLike, "discr_means_t B D"], query_t):
+    #t: Float[ArrayLike, "discr_means_t B"] = jnp.repeat(jnp.linspace(0, 1, xt.shape[0]), repeats=xt.shape[1], axis=-1)
+    velocities = (xt[1:] - xt[:-1]) / (t[1:] - t[:-1] + 1e-10)[..., None]
+    left = jnp.searchsorted(t[1:].T.ravel(), query_t.T.ravel(), side='left').reshape(t.shape)
     mask_l = jax.nn.one_hot(left, xt.shape[0]).permute(0, 2, 1).reshape(query_t.shape[0], xt.shape[0], xt.shape[1], 1)
     pass
 
@@ -33,27 +33,33 @@ class GaussianSpline(nn.Module):
     networks: Dict[str, nn.Module]
     
     def mean(self, time, **kwargs):
-        return self.networks['spline_mean'](time, **kwargs)
+        return self.networks['spline_means'](time, **kwargs)
     
-    def __call__(self, t, xt, s, ys, sigma):
+    def gamma(self, time, **kwargs):
+        return self.networks['spline_gammas'](time, **kwargs)
+    
+    def __call__(self, t):
         inits = {
-            "spline_mean": self.mean(t)
+            "spline_mean": self.mean(t),
+            "spline_gamma": self.gamma(t)
         }
         return inits
 
 class EndPointSpline(nn.Module):
-    shape: tuple
-    init: ArrayLike
-    x0: Float[ArrayLike, "1 B D"]
-    x1: Float[ArrayLike, "1 B D"]
+    shape: tuple = None
+    init: ArrayLike = None
+    x0: Float[ArrayLike, "1 B D"] = None
+    x1: Float[ArrayLike, "1 B D"] = None
+    spline_discr: Float[ArrayLike, "discr_means_t B"] = None
     
     @nn.compact
     def __call__(self, query_t):
         knots = self.param(
-            'knots', self.init, self.shape
+            'knots', lambda rng, shape: self.init, self.shape
         )
-        xt = jnp.concatenate([self.x0, knots, self.x1], dim=0) # (T, B, D)
-        yt = None #interp1d.linear_interp1d(self.t_epd, xt, mask, query_t)
+        query_t: Float[ArrayLike, "evalua_t B"] = jnp.repeat(query_t[:, None], repeats=knots.shape[0], axis=-1)
+        xt = jnp.concatenate([self.x0, knots.transpose(1, 0, 2), self.x1], axis=0) # (T, B, D)
+        yt = linear_interp1d(self.spline_discr, xt, query_t)
         return yt.transpose(1, 0, 2)
         
 class StdSpline(nn.Module):
@@ -67,8 +73,9 @@ class StdSpline(nn.Module):
         
 
 def cost_fn(potential):
-    def loss_fn(t, xt, ut):
+    def loss_fn(xt):
         cost_potential = potential(xt)
+        return cost_potential
     return loss_fn
                 
 
@@ -96,18 +103,29 @@ class GSBM:
         gamma_t = jnp.zeros((x0.shape[0], self.T_gamma, 1)) # (B, S, 1)
         
         optimizer = optax.adam(learning_rate=3e-4) # TODO: Add different lrs for different parts
-        spline_means = EndPointSpline(init=mean_x_t[:, 1:-1, :], shape=mean_x_t[:, 1:-1, :].shape, x0=x0[None], x1=x1[None])
+        spline_means = EndPointSpline(init=mean_x_t[:, 1:-1, :], shape=mean_x_t[:, 1:-1, :].shape, x0=x0[None], x1=x1[None],
+                                      spline_discr=jnp.repeat(mean_discrit[:, None], x0.shape[0], -1))
         spline_gammas = StdSpline()
-        network_def = GaussianSpline(dict={"spline_means": spline_means,
+        network_def = GaussianSpline(networks={"spline_means": spline_means,
                                            "spline_gammas": spline_gammas})
-        params = network_def.init(rng, mean_discrit, mean_x_t, gamma_discrit, gamma_t)['params']
+        params = network_def.init(rng, mean_discrit)['params']
         self.state = train_state.TrainState.create(
             params=params,
             apply_fn=network_def.apply,
             tx=optimizer
         )
     
-    def sample_xt(self, t: Float[ArrayLike, "T"], N: int, **kwargs) -> Float[ArrayLike, "B points T dim"]:
+    @jax.jit
+    def update_step(self, query_t):
+        xt = self.sample_xt(query_t)
+        ut = self.sample_ut(query_t, xt)
+        
+        def loss_fn(params):
+            pass
+        
+        return self.state.replace(params=params)
+    
+    def sample_xt(self, query_t: Float[ArrayLike, "T"], N: int, **kwargs) -> Float[ArrayLike, "B points T dim"]:
         mean_t = self.state(t, method='mean', **kwargs)
         
     
@@ -118,6 +136,8 @@ class GSBM:
       n_iters: int,
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
+      eps: float = 0.001,
+      timesteps_interpolate: int = 100
   ) -> Dict[str, List[float]]:
             
         loop_key = utils.default_prng_key(rng)
@@ -132,7 +152,10 @@ class GSBM:
         for batch in pbar:
             src, tgt = batch["src_lin"], batch["tgt_lin"]
             it_key = jax.random.fold_in(loop_key, it)
-
+            
+            # GSBM related
+            evaluation_timesteps = jnp.linspace(eps, 1-eps, timesteps_interpolate)
+            self.state, logs = None
             # ...
             
             if it % 10_000 == 0 and it > 0 and callback is not None:
