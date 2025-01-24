@@ -53,12 +53,24 @@ class EndPointSpline(nn.Module):
             'knots', self.init, self.shape
         )
         xt = jnp.concatenate([self.x0, knots, self.x1], dim=0) # (T, B, D)
-        yt = #interp1d.linear_interp1d(self.t_epd, xt, mask, query_t)
+        yt = None #interp1d.linear_interp1d(self.t_epd, xt, mask, query_t)
         return yt.transpose(1, 0, 2)
         
 class StdSpline(nn.Module):
-    pass    
+    sigma: float = 1.0
     
+    @nn.compact
+    def __call__(self, query_t):
+        base = self.sigma * jnp.sqrt(query_t * (1 - query_t))
+        xt = None
+        pass
+        
+
+def cost_fn(potential):
+    def loss_fn(t, xt, ut):
+        cost_potential = potential(xt)
+    return loss_fn
+                
 
 class GSBM:
     def __init__(
@@ -67,13 +79,15 @@ class GSBM:
         T_gamma=30, # number of knots for gamma spline 
         sigma: float = 1.0,
         lr_mean: float = 0.2,
-        lr_gamma: float = 0.1
+        lr_gamma: float = 0.1,
+        potential = None
     ):
         self.T_mean = T_mean
         self.T_gamma = T_gamma
         self.sigma = sigma
         self.lr_mean = lr_mean
         self.lr_gamma = lr_gamma
+        self.cost_fn = cost_fn(potential)
         
     def _initialize(self, x0: Float[ArrayLike, "B D"], x1: Float[ArrayLike, "B D"], rng: Key):
         mean_discrit = jnp.linspace(0, 1, self.T_mean) # discritization for mean spline
