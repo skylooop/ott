@@ -18,7 +18,7 @@ from flax.training import train_state
 from collections import defaultdict
 from jaxtyping import ArrayLike, Float, Key
 from flax.struct import PyTreeNode
-
+from ott.neural.methods.lagrangian.lagrangian_potentials import *
 __all__ = ["GSBM"]
 
 Callback_t = Callable[[int, ], None]
@@ -104,30 +104,50 @@ class StdSpline(nn.Module):
 #         return cost_potential
 #     return loss_fn
                 
-class GSBM:
-    def __init__(
-        self,
-        T_mean=15, # number of knots for mean spline
-        T_gamma=30, # number of knots for gamma spline 
-        sigma: float = 1.0,
-        lr_mean: float = 0.2,
-        lr_gamma: float = 0.1,
-        potential = None
-    ):
-        self.T_mean = T_mean
-        self.T_gamma = T_gamma
-        self.sigma = sigma
-        self.lr_mean = lr_mean
-        self.lr_gamma = lr_gamma
-        self.cost_fn = potential
-        
+class GSBM(PyTreeNode):
+    T_mean: int # number of knots for mean spline
+    T_gamma: int # number of knots for gamma spline 
+    sigma: float
+    lr_mean: float
+    lr_gamma: float
+    potential: LagrangianPotentialBase
+    state: train_state.TrainState = None
+    
+    # def __init__(
+    #     self,
+        # T_mean=15, # number of knots for mean spline
+        # T_gamma=30, # number of knots for gamma spline 
+        # sigma: float = 1.0,
+        # lr_mean: float = 0.2,
+        # lr_gamma: float = 0.1,
+        # potential = None
+    # ):
+    #     self.T_mean = T_mean
+    #     self.T_gamma = T_gamma
+    #     self.sigma = sigma
+    #     self.lr_mean = lr_mean
+    #     self.lr_gamma = lr_gamma
+    #     self.cost_fn = potential
+    
+    @classmethod
+    def create(cls, 
+            T_mean=15, # number of knots for mean spline
+            T_gamma=30, # number of knots for gamma spline 
+            sigma: float = 1.0,
+            lr_mean: float = 0.2,
+            lr_gamma: float = 0.1,
+            potential=None):
+        return cls(
+            T_mean=T_mean, T_gamma=T_gamma, sigma=sigma, lr_mean=lr_mean, lr_gamma=lr_gamma, potential=potential
+        )
+    
     def _initialize(self, x0: Float[ArrayLike, "B D"], x1: Float[ArrayLike, "B D"], rng: Key):
         mean_discrit = jnp.linspace(0, 1, self.T_mean) # discritization for mean spline
         gamma_discrit = jnp.linspace(0, 1, self.T_gamma)# discritization for gamma spline
         mean_x_t = (1 - mean_discrit[None, :, None]) * x0[:, None] + mean_discrit[None, :, None] * x1[:, None] # (B, T, D)
         gamma_t = jnp.zeros((x0.shape[0], self.T_gamma, 1)) # (B, evalua_t, 1)
         
-        optimizer = optax.adam(learning_rate=3e-4) # TODO: Add different lrs for different parts
+        optimizer = optax.adam(learning_rate=3e-4)
         mean_x_t = mean_x_t.transpose(1, 0, 2)
         gamma_t = gamma_t.transpose(1, 0, 2)
         spline_means = EndPointSpline(init=mean_x_t[1:-1, :], shape=mean_x_t[1:-1, :].shape, x0=mean_x_t[0][None], x1=mean_x_t[-1][None],
@@ -138,34 +158,35 @@ class GSBM:
         network_def = GaussianSpline(networks={"spline_means": spline_means,
                                            "spline_gammas": spline_gammas})
         params = network_def.init(rng, jnp.linspace(0, 1, 100))
-        self.state = train_state.TrainState.create(
+        state = train_state.TrainState.create(
             params=params,
             apply_fn=network_def.apply,
             tx=optimizer
         )
+        return self.replace(state = state)
     
-    
-    def update(self, query_t, rng):
+    @jax.jit
+    def update_step(self, gsbm, query_t, rng):
         def loss_fn(params):
-            xt = self.sample_xt(query_t, rng, params=params)
-            ut = self.sample_ut(query_t, xt, params=params)
-            potential_loss = jax.vmap(jax.vmap(self.cost_fn))(xt)
+            xt = self.sample_xt(gsbm, query_t, rng, params=params)
+            ut = self.sample_ut(gsbm, query_t, xt, params=params)
+            potential_loss = -jax.vmap(jax.vmap(gsbm.potential))(xt) * 1500
             scale = (0.5 / (self.sigma ** 2))
             cost_c = scale * (ut ** 2).sum(axis=-1)
             return (cost_c + potential_loss).mean()
         
-        loss, grads = jax.value_and_grad(loss_fn)(self.state.params)
-        updated_state = self.state.apply_gradients(grads=grads)
-        return self.state.replace(params=updated_state.params), loss
+        loss, grads = jax.value_and_grad(loss_fn)(gsbm.state.params)
+        updated_state = gsbm.state.apply_gradients(grads=grads)
+        return gsbm.replace(state=updated_state), loss
     
-    def sample_ut(self, query_t: Float[ArrayLike, "evalua_t"], xt: Float[ArrayLike, "B evalua_t D"], params, **kwargs):
+    def sample_ut(self, gsbm, query_t: Float[ArrayLike, "evalua_t"], xt: Float[ArrayLike, "B evalua_t D"], params, **kwargs):
         mean, dmean = jax.jvp(
-            partial(self.state.apply_fn, method='mean', **kwargs),
+            partial(gsbm.state.apply_fn, method='mean', **kwargs),
             (params, query_t),
             (jax.tree_map(jnp.zeros_like, params), jnp.ones_like(query_t))
         )
         std, dstd = jax.jvp(
-            partial(self.state.apply_fn, method='gamma', **kwargs),
+            partial(gsbm.state.apply_fn, method='gamma', **kwargs),
             (params, query_t),
             (jax.tree_map(jnp.zeros_like, params), jnp.ones_like(query_t))
         )
@@ -174,10 +195,10 @@ class GSBM:
         return drift
         
     
-    def sample_xt(self, query_t: Float[ArrayLike, "evalua_t"], rng, params=None, **kwargs) -> Float[ArrayLike, "B points evlua_t D"]:
+    def sample_xt(self, gsbm, query_t: Float[ArrayLike, "evalua_t"], rng, params=None, **kwargs) -> Float[ArrayLike, "B points evlua_t D"]:
         # sample from gaussian
-        mean_t: Float[ArrayLike, "B evalua_t D"] = self.state.apply_fn(params, query_t, method='mean', **kwargs)
-        std_t = self.state.apply_fn(params, query_t, method='gamma', **kwargs)
+        mean_t: Float[ArrayLike, "B evalua_t D"] = gsbm.state.apply_fn(params, query_t, method='mean', **kwargs)
+        std_t = gsbm.state.apply_fn(params, query_t, method='gamma', **kwargs)
         noise = jax.random.normal(rng, shape=mean_t.shape)
         xt = mean_t + noise * std_t
         return xt
@@ -199,24 +220,23 @@ class GSBM:
         x0 = next(loader)['src_lin']
         x1 = next(loader)['tgt_lin']
         training_logs = defaultdict()
+        gsbm = self._initialize(x0, x1, loop_key)
         
-        self._initialize(x0, x1, loop_key)
-        
-        for batch in pbar:
+        for _ in pbar:
             #src, tgt = batch["src_lin"], batch["tgt_lin"]
             it_key = jax.random.fold_in(loop_key, it)
             
             # GSBM related
             evaluation_timesteps = jnp.linspace(eps, 1-eps, timesteps_interpolate)
-            self.state, loss = self.update_step(evaluation_timesteps, it_key)
+            gsbm, loss = self.update_step(gsbm, evaluation_timesteps, it_key)
             # ...
             
-            if it % 1_000 == 0 and it > 0 and callback is not None:
-                callback(it, training_logs, self.transport)
+            if it % 1_000 == 0 and it > 0:# and callback is not None:
+                #callback(it, training_logs, self.transport)
                 pbar.set_postfix({'loss': loss})
             
             it += 1
             if it >= n_iters:
                 break
 
-        return training_logs
+        return training_logs, gsbm

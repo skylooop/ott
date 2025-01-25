@@ -1,12 +1,10 @@
 from abc import abstractmethod
 import jax.numpy as jnp
 import jax
-from jax import nn
 import numpy as np
 from ott.datasets import create_lagrangian_ds
 
 import functools
-from dataclasses import dataclass
 from flax.struct import PyTreeNode
 
 class LagrangianPotentialBase(PyTreeNode):
@@ -34,7 +32,7 @@ class LagrangianPotentialBase(PyTreeNode):
         elif t < 1e-3:
             t = 0.
         else:
-            t = nn.sigmoid(10.*(t-0.5))
+            t = jax.nn.sigmoid(10.*(t-0.5))
 
         M_start, M_end = self.M_bounds
         temp_start, temp_end = self.temp_bounds
@@ -65,14 +63,44 @@ class BoxPotential(LagrangianPotentialBase):
         return source_data, target_data
     
     def __call__(self, x):
-        assert x.ndim == 1 and x.shape[0] == self.D
-        Ux = (nn.sigmoid((x[0] - self.xmin) / self.temp) - \
-              nn.sigmoid((x[0] - self.xmax) / self.temp))
-        Uy = (nn.sigmoid((x[1] - self.ymin) / self.temp) - \
-              nn.sigmoid((x[1] - self.ymax) / self.temp))
+        #assert x.ndim == 1 and x.shape[0] == self.DD
+        Ux = (jax.nn.sigmoid((x[0] - self.xmin) / self.temp) - \
+              jax.nn.sigmoid((x[0] - self.xmax) / self.temp))
+        Uy = (jax.nn.sigmoid((x[1] - self.ymin) / self.temp) - \
+              jax.nn.sigmoid((x[1] - self.ymax) / self.temp))
         U = Ux * Uy
         return -self.M * U
 
+
+class DrunkernSpider(LagrangianPotentialBase):
+    x_axes_bounds: tuple = (-10, 10)
+    y_axes_bounds: tuple = (-10, 10)
+    
+    def obstacle_cfg_drunken_spider(self):
+        xys = [[-7, 0.5], [-7, -7.5]]
+        widths = [14, 14]
+        heights = [7, 7]
+        return xys, widths, heights
+    
+    def __call__(self, xt):
+        x, y = xt[0], xt[1]
+
+        def cost_fn(xy, width, height):
+
+            xbound = xy[0], xy[0] + width
+            ybound = xy[1], xy[1] + height
+
+            a = -5 * (x - xbound[0]) * (x - xbound[1])
+            b = -5 * (y - ybound[0]) * (y - ybound[1])
+
+            cost = jax.nn.softplus(a) * jax.nn.softplus(b)
+            assert cost.shape == xt.shape[:-1]
+            return cost
+
+        return 10 * sum(
+            cost_fn(xy, width, height)
+            for xy, width, height in zip(*self.obstacle_cfg_drunken_spider())
+        )
 
 class Styblinski_tan(LagrangianPotentialBase):
     def __call__(self, x, xmin, xmax):
@@ -101,10 +129,10 @@ class SlitPotential(LagrangianPotentialBase):
     
     def __call__(self, x):
         assert x.ndim == 1 and x.shape[0] == self.D
-        Ux = (nn.sigmoid((x[0] - self.xmin) / self.temp) - \
-                nn.sigmoid((x[0] - self.xmax) / self.temp))
-        Uy = (nn.sigmoid((x[1] - self.ymin) / self.temp) - \
-                nn.sigmoid((x[1] - self.ymax) / self.temp)) - 1.
+        Ux = (jax.nn.sigmoid((x[0] - self.xmin) / self.temp) - \
+                jax.nn.sigmoid((x[0] - self.xmax) / self.temp))
+        Uy = (jax.nn.sigmoid((x[1] - self.ymin) / self.temp) - \
+                jax.nn.sigmoid((x[1] - self.ymax) / self.temp)) - 1.
         U = Ux * Uy
         return U
 
@@ -132,16 +160,16 @@ class BabyMazePotential(LagrangianPotentialBase):
 
     def __call__(self, x):
         assert x.ndim == 1 and x.shape[0] == self.D
-        Ux1 = (nn.sigmoid((x[0] - self.xmin1) / self.temp) - \
-                nn.sigmoid((x[0] - self.xmax1) / self.temp))
-        Ux2 = (nn.sigmoid((x[0] - self.xmin2) / self.temp) - \
-                nn.sigmoid((x[0] - self.xmax2) / self.temp))
+        Ux1 = (jax.nn.sigmoid((x[0] - self.xmin1) / self.temp) - \
+                jax.nn.sigmoid((x[0] - self.xmax1) / self.temp))
+        Ux2 = (jax.nn.sigmoid((x[0] - self.xmin2) / self.temp) - \
+                jax.nn.sigmoid((x[0] - self.xmax2) / self.temp))
 
-        Uy1 = (nn.sigmoid((x[1] - self.ymin1) / self.temp) - \
-                nn.sigmoid((x[1] - self.ymax1) / self.temp)) - 1.
+        Uy1 = (jax.nn.sigmoid((x[1] - self.ymin1) / self.temp) - \
+                jax.nn.sigmoid((x[1] - self.ymax1) / self.temp)) - 1.
 
-        Uy2 = (nn.sigmoid((x[1] - self.ymin2) / self.temp) - \
-                nn.sigmoid((x[1] - self.ymax2) / self.temp)) - 1.
+        Uy2 = (jax.nn.sigmoid((x[1] - self.ymin2) / self.temp) - \
+                jax.nn.sigmoid((x[1] - self.ymax2) / self.temp)) - 1.
         U = Ux1 * Uy1 + Ux2 * Uy2
         return self.M*U
 
@@ -173,7 +201,7 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
         V = 0.
         for i in range(self.centers.shape[0]):
             dist = jnp.linalg.norm(x - self.centers[i])
-            V -= self.M * nn.sigmoid((self.radius - dist) / self.temp)
+            V -= self.M * jax.nn.sigmoid((self.radius - dist) / self.temp)
         return V
 
 class VNeck_Potential(LagrangianPotentialBase):
@@ -200,7 +228,7 @@ class VNeck_Potential(LagrangianPotentialBase):
         xs_sq = x*x
         d = self.coef * xs_sq[0] - xs_sq[1]
 
-        return - self.M * nn.sigmoid((-self.c_sq - d) / self.temp)
+        return - self.M * jax.nn.sigmoid((-self.c_sq - d) / self.temp)
 
 
 class STunnel_Potential(LagrangianPotentialBase):
@@ -215,10 +243,10 @@ class STunnel_Potential(LagrangianPotentialBase):
         V = 0.0
         d = self.a*(x[0]-self.centers[0][0])**2 + \
             self.b*(x[1]-self.centers[0][1])**2
-        V -= self.M * nn.sigmoid((self.c - d) / self.temp)
+        V -= self.M * jax.nn.sigmoid((self.c - d) / self.temp)
 
         d = self.a*(x[0]-self.centers[1][0])**2 + \
             self.b*(x[1]-self.centers[1][1])**2
-        V -= self.M * nn.sigmoid((self.c - d) / self.temp)
+        V -= self.M * jax.nn.sigmoid((self.c - d) / self.temp)
 
         return V
