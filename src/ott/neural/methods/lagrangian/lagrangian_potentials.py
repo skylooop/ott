@@ -6,6 +6,8 @@ from ott.datasets import create_lagrangian_ds
 
 import functools
 from flax.struct import PyTreeNode
+from jaxtyping import Float, ArrayLike
+import matplotlib.pyplot as plt
 
 class LagrangianPotentialBase(PyTreeNode):
     D: int = 2
@@ -70,17 +72,29 @@ class BoxPotential(LagrangianPotentialBase):
               jax.nn.sigmoid((x[1] - self.ymax) / self.temp))
         U = Ux * Uy
         return -self.M * U
-
+    
+def my_softplus(x, beta=1, threshold=20):
+    # mirroring the pytorch implementation https://pytorch.org/docs/stable/generated/torch.nn.Softplus.html
+    x_safe = jax.lax.select(x * beta < threshold, x, jax.numpy.ones_like(x))
+    return jax.lax.select(x * beta < threshold, 1/beta * jax.numpy.log(1 + jax.numpy.exp(beta * x_safe)), x)
 
 class DrunkernSpider(LagrangianPotentialBase):
-    x_axes_bounds: tuple = (-10, 10)
-    y_axes_bounds: tuple = (-10, 10)
+    x_axes_bounds: tuple = (-14, 14)
+    y_axes_bounds: tuple = (-14, 14)
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='drunken_spider', mean_left=-8.5, mean_right=8.5, key=None)
     
     def obstacle_cfg_drunken_spider(self):
         xys = [[-7, 0.5], [-7, -7.5]]
         widths = [14, 14]
         heights = [7, 7]
         return xys, widths, heights
+    
+    def get_samples(self, size, key):
+        drunken_spider_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(drunken_spider_sampler))
+        source_data = sampler['src_lin']
+        target_data = sampler['tgt_lin']
+        return source_data, target_data
     
     def __call__(self, xt):
         x, y = xt[0], xt[1]
@@ -93,7 +107,7 @@ class DrunkernSpider(LagrangianPotentialBase):
             a = -5 * (x - xbound[0]) * (x - xbound[1])
             b = -5 * (y - ybound[0]) * (y - ybound[1])
 
-            cost = jax.nn.softplus(a) * jax.nn.softplus(b)
+            cost = my_softplus(a, beta=20, threshold=1) * my_softplus(b, beta=20, threshold=1)
             assert cost.shape == xt.shape[:-1]
             return cost
 
@@ -250,3 +264,38 @@ class STunnel_Potential(LagrangianPotentialBase):
         V -= self.M * jax.nn.sigmoid((self.c - d) / self.temp)
 
         return V
+    
+## Utils
+
+def plot_potential(potential, fig=None, ax=None, invert_sign=False):
+    if ax is None:
+        plt.figure(figsize=(10, 8))
+        fig, ax = plt.subplots()
+
+    x, y = potential.get_boundaries()
+    x, y = jnp.meshgrid(x, y)
+    mesh = jnp.stack([x.ravel(), y.ravel()], -1).reshape(-1, 2)
+    if invert_sign:
+        z = jax.vmap(potential)(mesh).reshape([x.shape[0], x.shape[0]])
+    else:
+        z = -jax.vmap(potential)(mesh).reshape([x.shape[0], x.shape[0]])
+
+    contour = ax.contourf(x, y, z, x.shape[0], cmap='Blues')
+    plt.colorbar(ax=ax, mappable=contour)
+        
+    ax.set_xlim(*potential.x_axes_bounds)
+    ax.set_ylim(*potential.y_axes_bounds)
+    ax.grid(False)
+    return fig, ax
+    
+def draw_trajs(trajs: Float[ArrayLike, 'timestep point dim=2'], ax=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    colors = sns.color_palette("pastel", trajs.shape[1])
+    
+    for point in range(trajs.shape[1]):
+        for t in range(1, trajs.shape[0]):
+            ax.plot([trajs[t-1, point, 0], trajs[t, point, 0]],
+                    [trajs[t-1, point, 1], trajs[t, point, 1]],
+                    color=colors[point], linestyle="-", linewidth=1, marker='o', alpha=0.6, markersize=1)
+    return ax

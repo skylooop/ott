@@ -147,8 +147,10 @@ def create_gaussian_mixture_samplers(
   return train_dataset, valid_dataset, dim_data
 
 class UniformLineDataset:
-    def __init__(self, size):#, src_mean, tgt_mean):
+    def __init__(self, size, mean_left=-1., mean_right=1.):#, src_mean, tgt_mean):
         self.size = size
+        self.mean_right = mean_right
+        self.mean_left = mean_left
         # self.src_mean = src_mean
         # self.tgt_mean = tgt_mean
         
@@ -156,19 +158,19 @@ class UniformLineDataset:
         rng = jax.random.PRNGKey(42)
         while True:
             rng, sample_key = jax.random.split(rng, 2)
-            yield UniformLineDataset._sample(sample_key, self.size)
+            yield UniformLineDataset._sample(sample_key, self.size, self.mean_left, self.mean_right)
 
     @staticmethod
-    @partial(jax.jit, static_argnums=1)
-    def _sample(key, batch_size):
+    @partial(jax.jit, static_argnums=(1, 2, 3))
+    def _sample(key, batch_size, mean_left, mean_right):
         k1, k2, key = jax.random.split(key, 3)
-        x1 = jax.random.uniform(k1, (batch_size, 1), minval=-1.25, maxval=-1.0)
-        x2 = jax.random.uniform(k2, (batch_size, 1), minval=-1.0, maxval=1.0)
+        x1 = jax.random.uniform(k1, (batch_size, 1), minval=mean_left-0.65, maxval=mean_left)
+        x2 = jax.random.uniform(k2, (batch_size, 1), minval=-5.0, maxval=5.0)
         x_0 = jnp.concatenate([x1, x2], axis=1)
         
         k1, k2, key = jax.random.split(key, 3)
-        x1 = jax.random.uniform(k1, (batch_size, 1), minval=1, maxval=1.25)
-        x2 = jax.random.uniform(k2, (batch_size, 1), minval=-1.0, maxval=1.0)
+        x1 = jax.random.uniform(k1, (batch_size, 1), minval=mean_right, maxval=mean_right+0.65)
+        x2 = jax.random.uniform(k2, (batch_size, 1), minval=-5.0, maxval=5.0)
         x_1 = jnp.concatenate([x1, x2], axis=1)
 
         return {
@@ -206,7 +208,7 @@ class Gaussian:
 
             yield {"src_lin": source_samples, 'tgt_lin': target_samples}
             
-def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
+def create_lagrangian_ds(geometry_str: str, batch_size: int, mean_left, mean_right, key=None):
   if geometry_str == "babymaze":
     return UniformLineDataset(size=batch_size)
     # variance = 0.1
@@ -214,16 +216,19 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
     # target_mean = jnp.array([1.5, -0.0])
     
   elif geometry_str == "box":
-    return UniformLineDataset(size=batch_size)
+    return UniformLineDataset(size=batch_size, mean_left=mean_left, mean_right=mean_right)
+  
+  elif geometry_str == "drunken_spider":
+    return UniformLineDataset(size=batch_size, mean_left=mean_left, mean_right=mean_right)
   
   elif geometry_str == "vneck":
-    return UniformLineDataset(size=batch_size)
+    return UniformLineDataset(size=batch_size, mean_left=mean_left, mean_right=mean_right)
     # variance = 0.15
     # source_mean = jnp.array([-2.5, 0.0])
     # target_mean = jnp.array([2.5, 0.0])
   
   elif geometry_str == "slit":
-    return UniformLineDataset(size=batch_size)
+    return UniformLineDataset(size=batch_size, mean_left=mean_left, mean_right=mean_right)
     # variance = 0.1
     # source_mean = jnp.array([-1.0, 0.0])
     # target_mean = jnp.array([1.0, 0.0])
