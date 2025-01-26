@@ -23,6 +23,11 @@ __all__ = ["GSBM"]
 
 Callback_t = Callable[[int, ], None]
 
+def my_softplus(x, beta=1, threshold=20):
+    # mirroring the pytorch implementation https://pytorch.org/docs/stable/generated/torch.nn.Softplus.html
+    x_safe = jax.lax.select(x * beta < threshold, x, jax.numpy.ones_like(x))
+    return jax.lax.select(x * beta < threshold, 1/beta * jax.numpy.log(1 + jax.numpy.exp(beta * x_safe)), x)
+
 def linear_interp1d(t: Float[ArrayLike, "discr_means_t B"], xt: Float[ArrayLike, "discr_means_t B D"], query_t: Float[ArrayLike, "evalua_t B"]):
     #t: Float[ArrayLike, "discr_means_t B"] = jnp.repeat(jnp.linspace(0, 1, xt.shape[0]), repeats=xt.shape[1], axis=-1)
     velocities = (xt[1:] - xt[:-1]) / (t[1:] - t[:-1] + 1e-10)[..., None]
@@ -51,6 +56,13 @@ class GaussianSpline(nn.Module):
     
     def gamma(self, time, **kwargs):
         return self.networks['spline_gammas'](time, **kwargs)
+    
+    def get_xt(self) -> Float[ArrayLike, "T B D"]:
+        return jnp.concatenate([self.networks['spline_means'].x0, self.networks['spline_means'].variables['params']['knots'],
+                                self.networks['spline_means'].x1], axis=0)
+    
+    def get_gamma(self, **kwargs):
+        return self.networks['spline_gammas'](self.networks['spline_gammas'].spline_discr[:, 0], **kwargs)
     
     def __call__(self, t):
         inits = {
@@ -84,7 +96,6 @@ class StdSpline(nn.Module):
     x0: Float[ArrayLike, "1 B D"] = None
     x1: Float[ArrayLike, "1 B D"] = None
     spline_discr: Float[ArrayLike, "discr_means_s B"] = None
-    #xt: Float[ArrayLike, "discr_means_s B D"] # spline knots for gammat
     
     @nn.compact
     def __call__(self, query_t: Float[ArrayLike, "evalua_t"]):
@@ -95,15 +106,17 @@ class StdSpline(nn.Module):
         query_t: Float[ArrayLike, "evalua_t B"] = jnp.repeat(query_t[:, None], repeats=knots.shape[1], axis=-1)
         xt = jnp.concatenate([self.x0, knots, self.x1], axis=0) # (T, B, D)
         xt = linear_interp1d(self.spline_discr, xt, query_t).transpose(1, 0, 2)
-        return base.reshape(1, -1, 1) * jax.nn.softplus(xt)
+        return base.reshape(1, -1, 1) * my_softplus(xt)
         
-
-# def cost_fn(potential):
-#     def loss_fn(xt):
-#         cost_potential = potential(xt)
-#         return cost_potential
-#     return loss_fn
-                
+def map_nested_fn(fn):
+  '''Recursively apply `fn` to key-value pairs of a nested dict.'''
+  def map_fn(nested_dict):
+      #temp = {k: fn(k, v) for k, v in nested_dict['params'].items()}
+      return {"params": {k: fn(k, v) for k, v in nested_dict['params'].items()}}
+    # return {k: (map_fn(v) if isinstance(v, dict) else fn(k, v))
+    #         for k, v in nested_dict.items()}
+  return map_fn
+        
 class GSBM(PyTreeNode):
     T_mean: int # number of knots for mean spline
     T_gamma: int # number of knots for gamma spline 
@@ -112,47 +125,37 @@ class GSBM(PyTreeNode):
     lr_gamma: float
     potential: LagrangianPotentialBase
     state: train_state.TrainState = None
-    
-    # def __init__(
-    #     self,
-        # T_mean=15, # number of knots for mean spline
-        # T_gamma=30, # number of knots for gamma spline 
-        # sigma: float = 1.0,
-        # lr_mean: float = 0.2,
-        # lr_gamma: float = 0.1,
-        # potential = None
-    # ):
-    #     self.T_mean = T_mean
-    #     self.T_gamma = T_gamma
-    #     self.sigma = sigma
-    #     self.lr_mean = lr_mean
-    #     self.lr_gamma = lr_gamma
-    #     self.cost_fn = potential
-    
+
     @classmethod
     def create(cls, 
             T_mean=15, # number of knots for mean spline
             T_gamma=30, # number of knots for gamma spline 
             sigma: float = 1.0,
-            lr_mean: float = 0.2,
-            lr_gamma: float = 0.1,
+            lr_mean: float = 3e-4,
+            lr_gamma: float = 3e-4,
             potential=None):
         return cls(
             T_mean=T_mean, T_gamma=T_gamma, sigma=sigma, lr_mean=lr_mean, lr_gamma=lr_gamma, potential=potential
         )
-    
+     
     def _initialize(self, x0: Float[ArrayLike, "B D"], x1: Float[ArrayLike, "B D"], rng: Key):
+        # x0 = next(loader)['src_lin']
+        # x1 = next(loader)['tgt_lin']
+        # gsbm = self._initialize(x0, x1, loop_key)
+        
         mean_discrit = jnp.linspace(0, 1, self.T_mean) # discritization for mean spline
         gamma_discrit = jnp.linspace(0, 1, self.T_gamma)# discritization for gamma spline
         mean_x_t = (1 - mean_discrit[None, :, None]) * x0[:, None] + mean_discrit[None, :, None] * x1[:, None] # (B, T, D)
-        gamma_t = jnp.zeros((x0.shape[0], self.T_gamma, 1)) # (B, evalua_t, 1)
+        gamma_t = jnp.zeros((x0.shape[0], self.T_gamma, 1)) # (B, T_gamma, 1)
         
-        optimizer = optax.adam(learning_rate=3e-4)
-        mean_x_t = mean_x_t.transpose(1, 0, 2)
-        gamma_t = gamma_t.transpose(1, 0, 2)
-        spline_means = EndPointSpline(init=mean_x_t[1:-1, :], shape=mean_x_t[1:-1, :].shape, x0=mean_x_t[0][None], x1=mean_x_t[-1][None],
+        label_fn = map_nested_fn(lambda k, _: "means" if k == "networks_spline_means" else "gammas")
+        optimizer = optax.multi_transform({"means": optax.sgd(learning_rate=self.lr_mean),
+                                           "gammas": optax.sgd(learning_rate=self.lr_gamma)}, label_fn)#optax.adam(learning_rate=3e-4)
+        mean_x_t: Float[ArrayLike, "T B D"] = mean_x_t.transpose(1, 0, 2)
+        gamma_t: Float[ArrayLike, "T B 1"] = gamma_t.transpose(1, 0, 2)
+        spline_means = EndPointSpline(init=mean_x_t[1:-1, ...], shape=mean_x_t[1:-1, ...].shape, x0=mean_x_t[0][None], x1=mean_x_t[-1][None],
                                       spline_discr=jnp.repeat(mean_discrit[:, None], x0.shape[0], -1))#, xt=mean_x_t)
-        spline_gammas = StdSpline(init=gamma_t[1:-1, :], shape=gamma_t[1:-1, :].shape, x0=gamma_t[0][None], x1=gamma_t[-1][None],
+        spline_gammas = StdSpline(init=gamma_t[1:-1, ...], shape=gamma_t[1:-1, ...].shape, x0=gamma_t[0][None], x1=gamma_t[-1][None],
                                       spline_discr=jnp.repeat(gamma_discrit[:, None], x0.shape[0], -1))#, xt=gamma_t)
         
         network_def = GaussianSpline(networks={"spline_means": spline_means,
@@ -203,10 +206,16 @@ class GSBM(PyTreeNode):
         xt = mean_t + noise * std_t
         return xt
     
+    def get_final_xt(self):
+        return self.state.apply_fn(self.state.params, method='get_xt')
+    
+    def get_final_gammas(self):
+        return self.state.apply_fn(self.state.params, method='get_gamma')
+    
     def __call__(  # noqa: D102
       self,
-      loader: Iterable[Dict[str, np.ndarray]],
-      *,
+      #loader: Iterable[Dict[str, np.ndarray]],
+      gsbm,
       n_iters: int,
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
@@ -216,14 +225,9 @@ class GSBM(PyTreeNode):
             
         loop_key = utils.default_prng_key(rng)
         it = 0
-        pbar = tqdm(loader, total=n_iters, colour='green', dynamic_ncols=True)
-        x0 = next(loader)['src_lin']
-        x1 = next(loader)['tgt_lin']
-        training_logs = defaultdict()
-        gsbm = self._initialize(x0, x1, loop_key)
+        pbar = tqdm(range(n_iters), total=n_iters, colour='green', dynamic_ncols=True)
         
         for _ in pbar:
-            #src, tgt = batch["src_lin"], batch["tgt_lin"]
             it_key = jax.random.fold_in(loop_key, it)
             
             # GSBM related
@@ -239,4 +243,4 @@ class GSBM(PyTreeNode):
             if it >= n_iters:
                 break
 
-        return training_logs, gsbm
+        return gsbm

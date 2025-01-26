@@ -51,8 +51,10 @@ class BoxPotential(LagrangianPotentialBase):
     xmax: float = 0.5
     ymin: float = -0.5
     ymax: float = 0.5
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box', key=None)
-
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box', key=None, mean_left=-1., mean_right=1., height=0.85)
+    
+    x_axes_bounds: tuple = (-1.5, 1.5)
+    y_axes_bounds: tuple = (-1.5, 1.5)
     def get_boundaries(self):
         return jnp.linspace(self.x_axes_bounds[0] * self.scale, self.x_axes_bounds[1] * self.scale), \
             jnp.linspace(self.y_axes_bounds[0] * self.scale, self.y_axes_bounds[1] * self.scale)
@@ -81,7 +83,8 @@ def my_softplus(x, beta=1, threshold=20):
 class DrunkernSpider(LagrangianPotentialBase):
     x_axes_bounds: tuple = (-14, 14)
     y_axes_bounds: tuple = (-14, 14)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='drunken_spider', mean_left=-8.5, mean_right=8.5, key=None)
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='drunken_spider', mean_left=-8.5, mean_right=8.5, key=None,
+                                     height=5.0)
     
     def obstacle_cfg_drunken_spider(self):
         xys = [[-7, 0.5], [-7, -7.5]]
@@ -132,7 +135,7 @@ class SlitPotential(LagrangianPotentialBase):
 
     x_axes_bounds = (-1.5, 1.5)
     y_axes_bounds = (-2., 2.)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='slit')
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='slit', mean_left=-1, mean_right=1, height=1.)
 
     def get_samples(self, size, key):
         vneck_sampler = self.sampler_func(batch_size=size, key=key)
@@ -163,7 +166,7 @@ class BabyMazePotential(LagrangianPotentialBase):
 
     x_axes_bounds = (-2.5, 2.5)
     y_axes_bounds = (-2.5, 2.5)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze')
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze', mean_left=-2., mean_right=2., height=1)
 
     def get_samples(self, size, key):
         maze_sampler = self.sampler_func(batch_size=size, key=key)
@@ -227,7 +230,7 @@ class VNeck_Potential(LagrangianPotentialBase):
     x_axes_bounds = (-3., 3.)
     y_axes_bounds = (-5., 5.)
     
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck')
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck', mean_left=-1.5, mean_right=1.5, height=1.25)
     
     def get_samples(self, size, key):
         box_sampler = self.sampler_func(batch_size=size, key=key)
@@ -289,6 +292,7 @@ def plot_potential(potential, fig=None, ax=None, invert_sign=False):
     return fig, ax
     
 def draw_trajs(trajs: Float[ArrayLike, 'timestep point dim=2'], ax=None):
+    import seaborn as sns
     if ax is None:
         fig, ax = plt.subplots()
     colors = sns.color_palette("pastel", trajs.shape[1])
