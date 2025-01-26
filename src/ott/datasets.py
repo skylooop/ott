@@ -212,7 +212,7 @@ class Gaussian:
             
 def create_lagrangian_ds(geometry_str: str, batch_size: int, mean_left, mean_right, height, key=None):
   if geometry_str == "babymaze":
-    return UniformLineDataset(size=batch_size)
+    return UniformLineDataset(size=batch_size, mean_left=mean_left, mean_right=mean_right, height=height)
     # variance = 0.1
     # source_mean = jnp.array([-1.5, 0.5])
     # target_mean = jnp.array([1.5, -0.0])

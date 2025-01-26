@@ -55,6 +55,8 @@ class BoxPotential(LagrangianPotentialBase):
     
     x_axes_bounds: tuple = (-1.5, 1.5)
     y_axes_bounds: tuple = (-1.5, 1.5)
+    #scale_value_by: float = 1_000 # for gsbm
+    
     def get_boundaries(self):
         return jnp.linspace(self.x_axes_bounds[0] * self.scale, self.x_axes_bounds[1] * self.scale), \
             jnp.linspace(self.y_axes_bounds[0] * self.scale, self.y_axes_bounds[1] * self.scale)
@@ -73,7 +75,7 @@ class BoxPotential(LagrangianPotentialBase):
         Uy = (jax.nn.sigmoid((x[1] - self.ymin) / self.temp) - \
               jax.nn.sigmoid((x[1] - self.ymax) / self.temp))
         U = Ux * Uy
-        return -self.M * U
+        return self.M * U
     
 def my_softplus(x, beta=1, threshold=20):
     # mirroring the pytorch implementation https://pytorch.org/docs/stable/generated/torch.nn.Softplus.html
@@ -114,7 +116,7 @@ class DrunkernSpider(LagrangianPotentialBase):
             assert cost.shape == xt.shape[:-1]
             return cost
 
-        return 10 * sum(
+        return sum(
             cost_fn(xy, width, height)
             for xy, width, height in zip(*self.obstacle_cfg_drunken_spider())
         )
@@ -126,6 +128,39 @@ class Styblinski_tan(LagrangianPotentialBase):
         x = a + ((x - xmin)*(b - a)) / (xmax - xmin)
         return 0.5*np.sum(jnp.power(x, 4) - 16*jnp.power(x, 2) + 5*x, axis=0)
 
+# class SlitPotential(LagrangianPotentialBase):
+#     xmin: float = -0.1
+#     xmax: float = 0.1
+#     ymin: float = -0.25
+#     ymax: float = 0.25
+#     M_bounds = (0., 1.)
+
+#     x_axes_bounds = (-1.5, 1.5)
+#     y_axes_bounds = (-2., 2.)
+#     sampler_func = functools.partial(create_lagrangian_ds, geometry_str='slit', mean_left=-1, mean_right=1, height=1.)
+
+#     def get_samples(self, size, key):
+#         vneck_sampler = self.sampler_func(batch_size=size, key=key)
+#         sampler = next(iter(vneck_sampler))
+#         source_data = sampler['src_lin']
+#         target_data = sampler['tgt_lin']
+#         return source_data, target_data
+    
+#     def __call__(self, x):
+#        # assert x.ndim == 1 and x.shape[0] == self.D
+#         Ux = (jax.nn.sigmoid((x[0] - self.xmin) / self.temp) - \
+#                 jax.nn.sigmoid((x[0] - self.xmax) / self.temp))
+#         Uy = (jax.nn.sigmoid((x[1] - self.ymin) / self.temp) - \
+#                 jax.nn.sigmoid((x[1] - self.ymax) / self.temp)) - 1.
+#         U = Ux * Uy
+#         return -U# * 10_000 * 9
+
+
+def obstacle_cfg_stunnel():
+    a, b, c = 20, 1, 90
+    centers = [[5, 6], [-5, -6]]
+    return a, b, c, centers
+
 class SlitPotential(LagrangianPotentialBase):
     xmin: float = -0.1
     xmax: float = 0.1
@@ -133,25 +168,37 @@ class SlitPotential(LagrangianPotentialBase):
     ymax: float = 0.25
     M_bounds = (0., 1.)
 
-    x_axes_bounds = (-1.5, 1.5)
-    y_axes_bounds = (-2., 2.)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='slit', mean_left=-1, mean_right=1, height=1.)
+    x_axes_bounds = (-15, 15.)
+    y_axes_bounds = (-15., 15.)
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='slit', mean_left=-13, mean_right=13, height=4.)
 
     def get_samples(self, size, key):
-        vneck_sampler = self.sampler_func(batch_size=size, key=key)
-        sampler = next(iter(vneck_sampler))
+        slit_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(slit_sampler))
         source_data = sampler['src_lin']
         target_data = sampler['tgt_lin']
         return source_data, target_data
     
-    def __call__(self, x):
-        assert x.ndim == 1 and x.shape[0] == self.D
-        Ux = (jax.nn.sigmoid((x[0] - self.xmin) / self.temp) - \
-                jax.nn.sigmoid((x[0] - self.xmax) / self.temp))
-        Uy = (jax.nn.sigmoid((x[1] - self.ymin) / self.temp) - \
-                jax.nn.sigmoid((x[1] - self.ymax) / self.temp)) - 1.
-        U = Ux * Uy
-        return U
+    def __call__(self, xt):
+       # assert x.ndim == 1 and x.shape[0] == self.D
+        a, b, c, centers = obstacle_cfg_stunnel()
+
+        Bs, D = xt.shape[:-1], xt.shape[-1]
+
+        _xt = xt.reshape(-1, D)
+        x, y = _xt[:, 0], _xt[:, 1]
+
+        d = a * (x - centers[0][0]) ** 2 + b * (y - centers[0][1]) ** 2
+        # c1 = 1500 * (d < c)
+        c1 = my_softplus(c - d, beta=1, threshold=20)
+
+        d = a * (x - centers[1][0]) ** 2 + b * (y - centers[1][1]) ** 2
+        # c2 = 1500 * (d < c)
+        c2 = my_softplus(c - d, beta=1, threshold=20)
+
+        cost = (c1 + c2).reshape(*Bs)
+        return cost * 1_500
+
 
 class BabyMazePotential(LagrangianPotentialBase):
     xmin1: float = -0.5
@@ -166,7 +213,7 @@ class BabyMazePotential(LagrangianPotentialBase):
 
     x_axes_bounds = (-2.5, 2.5)
     y_axes_bounds = (-2.5, 2.5)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze', mean_left=-2., mean_right=2., height=1)
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze', mean_left=-1.5, mean_right=1.5, height=1)
 
     def get_samples(self, size, key):
         maze_sampler = self.sampler_func(batch_size=size, key=key)

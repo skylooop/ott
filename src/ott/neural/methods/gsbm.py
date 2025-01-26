@@ -149,8 +149,10 @@ class GSBM(PyTreeNode):
         gamma_t = jnp.zeros((x0.shape[0], self.T_gamma, 1)) # (B, T_gamma, 1)
         
         label_fn = map_nested_fn(lambda k, _: "means" if k == "networks_spline_means" else "gammas")
-        optimizer = optax.multi_transform({"means": optax.sgd(learning_rate=self.lr_mean),
-                                           "gammas": optax.sgd(learning_rate=self.lr_gamma)}, label_fn)#optax.adam(learning_rate=3e-4)
+        means_scheduler = optax.linear_schedule(init_value=self.lr_mean, end_value=1e-4, transition_steps=10_000, transition_begin=5_000)
+        gammas_scheduler = optax.linear_schedule(init_value=self.lr_gamma, end_value=2e-4, transition_steps=10_000,transition_begin=5_000 )
+        optimizer = optax.multi_transform({"means": optax.adam(learning_rate=means_scheduler),
+                                           "gammas": optax.adam(learning_rate=gammas_scheduler)}, label_fn)#optax.adam(learning_rate=3e-4)
         mean_x_t: Float[ArrayLike, "T B D"] = mean_x_t.transpose(1, 0, 2)
         gamma_t: Float[ArrayLike, "T B 1"] = gamma_t.transpose(1, 0, 2)
         spline_means = EndPointSpline(init=mean_x_t[1:-1, ...], shape=mean_x_t[1:-1, ...].shape, x0=mean_x_t[0][None], x1=mean_x_t[-1][None],
@@ -173,14 +175,14 @@ class GSBM(PyTreeNode):
         def loss_fn(params):
             xt = self.sample_xt(gsbm, query_t, rng, params=params)
             ut = self.sample_ut(gsbm, query_t, xt, params=params)
-            potential_loss = -jax.vmap(jax.vmap(gsbm.potential))(xt) * 1500
+            potential_loss = jax.vmap(jax.vmap(gsbm.potential))(xt)
             scale = (0.5 / (self.sigma ** 2))
             cost_c = scale * (ut ** 2).sum(axis=-1)
             return (cost_c + potential_loss).mean()
         
         loss, grads = jax.value_and_grad(loss_fn)(gsbm.state.params)
         updated_state = gsbm.state.apply_gradients(grads=grads)
-        return gsbm.replace(state=updated_state), loss
+        return self.replace(state=updated_state), loss
     
     def sample_ut(self, gsbm, query_t: Float[ArrayLike, "evalua_t"], xt: Float[ArrayLike, "B evalua_t D"], params, **kwargs):
         mean, dmean = jax.jvp(
