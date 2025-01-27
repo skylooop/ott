@@ -149,8 +149,8 @@ class GSBM(PyTreeNode):
         gamma_t = jnp.zeros((x0.shape[0], self.T_gamma, 1)) # (B, T_gamma, 1)
         
         label_fn = map_nested_fn(lambda k, _: "means" if k == "networks_spline_means" else "gammas")
-        means_scheduler = optax.linear_schedule(init_value=self.lr_mean, end_value=1e-4, transition_steps=10_000, transition_begin=5_000)
-        gammas_scheduler = optax.linear_schedule(init_value=self.lr_gamma, end_value=2e-4, transition_steps=10_000,transition_begin=5_000 )
+        means_scheduler = optax.linear_schedule(init_value=self.lr_mean, end_value=9e-1, transition_steps=10_000, transition_begin=4_000)
+        gammas_scheduler = optax.linear_schedule(init_value=self.lr_gamma, end_value=9e-1, transition_steps=10_000,transition_begin=4_000 )
         optimizer = optax.multi_transform({"means": optax.adam(learning_rate=means_scheduler),
                                            "gammas": optax.adam(learning_rate=gammas_scheduler)}, label_fn)#optax.adam(learning_rate=3e-4)
         mean_x_t: Float[ArrayLike, "T B D"] = mean_x_t.transpose(1, 0, 2)
@@ -227,7 +227,7 @@ class GSBM(PyTreeNode):
             
         loop_key = utils.default_prng_key(rng)
         it = 0
-        pbar = tqdm(range(n_iters), total=n_iters, colour='green', dynamic_ncols=True)
+        pbar = tqdm(range(n_iters + 1), total=n_iters, colour='green', dynamic_ncols=True)
         
         for _ in pbar:
             it_key = jax.random.fold_in(loop_key, it)

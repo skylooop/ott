@@ -17,7 +17,7 @@ class LagrangianPotentialBase(PyTreeNode):
     temp_bounds = (1e-1, 1e-2)
 
     M: float = 0.01
-    temp: float = 1e-2
+    temp: float = 1e-1
 
     x_axes_bounds = (-1.5, 1.5)
     y_axes_bounds = (-1.5, 1.5)
@@ -47,14 +47,14 @@ class LagrangianPotentialBase(PyTreeNode):
             jnp.linspace(self.y_axes_bounds[0] * self.scale, self.y_axes_bounds[1] * self.scale, num=200)
             
 class BoxPotential(LagrangianPotentialBase):
-    xmin: float = -0.5
-    xmax: float = 0.5
-    ymin: float = -0.5
-    ymax: float = 0.5
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box', key=None, mean_left=-1., mean_right=1., height=0.85)
+    xmin: float = -3.5
+    xmax: float = 3.5
+    ymin: float = -1.5
+    ymax: float = 1.5
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box', key=None, mean_left=-6.5, mean_right=6.5, height=1.5)
     
-    x_axes_bounds: tuple = (-1.5, 1.5)
-    y_axes_bounds: tuple = (-1.5, 1.5)
+    x_axes_bounds: tuple = (-9, 9)
+    y_axes_bounds: tuple = (-5.5, 5.5)
     #scale_value_by: float = 1_000 # for gsbm
     
     def get_boundaries(self):
@@ -70,12 +70,16 @@ class BoxPotential(LagrangianPotentialBase):
     
     def __call__(self, x):
         #assert x.ndim == 1 and x.shape[0] == self.DD
+        # Ux = (my_softplus((x[0] - self.xmin) / self.temp, beta=20, threshold=1) - \
+        #       my_softplus((x[0] - self.xmax) / self.temp, beta=20, threshold=1))
+        # Uy = (my_softplus((x[1] - self.ymin) / self.temp, beta=20, threshold=1) - \
+        #       my_softplus((x[1] - self.ymax) / self.temp, beta=20, threshold=1))
         Ux = (jax.nn.sigmoid((x[0] - self.xmin) / self.temp) - \
               jax.nn.sigmoid((x[0] - self.xmax) / self.temp))
         Uy = (jax.nn.sigmoid((x[1] - self.ymin) / self.temp) - \
               jax.nn.sigmoid((x[1] - self.ymax) / self.temp))
         U = Ux * Uy
-        return self.M * U
+        return U * 5_000
     
 def my_softplus(x, beta=1, threshold=20):
     # mirroring the pytorch implementation https://pytorch.org/docs/stable/generated/torch.nn.Softplus.html
@@ -85,7 +89,7 @@ def my_softplus(x, beta=1, threshold=20):
 class DrunkernSpider(LagrangianPotentialBase):
     x_axes_bounds: tuple = (-14, 14)
     y_axes_bounds: tuple = (-14, 14)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='drunken_spider', mean_left=-8.5, mean_right=8.5, key=None,
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='drunken_spider', mean_left=-9.5, mean_right=9.5, key=None,
                                      height=5.0)
     
     def obstacle_cfg_drunken_spider(self):
@@ -113,8 +117,9 @@ class DrunkernSpider(LagrangianPotentialBase):
             b = -5 * (y - ybound[0]) * (y - ybound[1])
 
             cost = my_softplus(a, beta=20, threshold=1) * my_softplus(b, beta=20, threshold=1)
-            assert cost.shape == xt.shape[:-1]
-            return cost
+            #cost = jax.nn.sigmoid(a) * jax.nn.sigmoid(b)
+            #assert cost.shape == xt.shape[:-1]
+            return cost# * 20_000
 
         return sum(
             cost_fn(xy, width, height)
@@ -191,11 +196,11 @@ class SlitPotential(LagrangianPotentialBase):
         d = a * (x - centers[0][0]) ** 2 + b * (y - centers[0][1]) ** 2
         # c1 = 1500 * (d < c)
         c1 = my_softplus(c - d, beta=1, threshold=20)
-
+        #c1 = jax.nn.sigmoid(c - d)
         d = a * (x - centers[1][0]) ** 2 + b * (y - centers[1][1]) ** 2
         # c2 = 1500 * (d < c)
         c2 = my_softplus(c - d, beta=1, threshold=20)
-
+        #c2 = jax.nn.sigmoid(c - d)
         cost = (c1 + c2).reshape(*Bs)
         return cost * 1_500
 
@@ -211,9 +216,9 @@ class BabyMazePotential(LagrangianPotentialBase):
     ymax2: float = 1.99
     M_bounds = (0., 10.)
 
-    x_axes_bounds = (-2.5, 2.5)
-    y_axes_bounds = (-2.5, 2.5)
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze', mean_left=-1.5, mean_right=1.5, height=1)
+    x_axes_bounds = (-8.5, 8.5)
+    y_axes_bounds = (-6.5, 6.5)
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze', mean_left=-4.5, mean_right=4.5, height=1.5)
 
     def get_samples(self, size, key):
         maze_sampler = self.sampler_func(batch_size=size, key=key)
@@ -223,7 +228,7 @@ class BabyMazePotential(LagrangianPotentialBase):
         return source_data, target_data
 
     def __call__(self, x):
-        assert x.ndim == 1 and x.shape[0] == self.D
+        #assert x.ndim == 1 and x.shape[0] == self.D
         Ux1 = (jax.nn.sigmoid((x[0] - self.xmin1) / self.temp) - \
                 jax.nn.sigmoid((x[0] - self.xmax1) / self.temp))
         Ux2 = (jax.nn.sigmoid((x[0] - self.xmin2) / self.temp) - \
@@ -235,8 +240,31 @@ class BabyMazePotential(LagrangianPotentialBase):
         Uy2 = (jax.nn.sigmoid((x[1] - self.ymin2) / self.temp) - \
                 jax.nn.sigmoid((x[1] - self.ymax2) / self.temp)) - 1.
         U = Ux1 * Uy1 + Ux2 * Uy2
-        return self.M*U
+        return -U# * 40_000
 
+# class GMM_Potential(LagrangianPotentialBase):
+#     def __call__(self, xt):
+
+#         Bs, D = xt.shape[:-1], xt.shape[-1]
+#         assert D == 2
+#         xt = xt.reshape(-1, xt.shape[-1])
+
+#         batch_xt = xt.shape[0]
+
+#         centers, radius = obstacle_cfg_gmm()
+
+#         obs1 = torch.tensor(centers[0]).repeat((batch_xt, 1)).to(xt.device)
+#         obs2 = torch.tensor(centers[1]).repeat((batch_xt, 1)).to(xt.device)
+#         obs3 = torch.tensor(centers[2]).repeat((batch_xt, 1)).to(xt.device)
+
+#         dist1 = torch.norm(xt - obs1, dim=-1)
+#         dist2 = torch.norm(xt - obs2, dim=-1)
+#         dist3 = torch.norm(xt - obs3, dim=-1)
+
+#         cost1 = F.softplus(100 * (radius - dist1), beta=1, threshold=20)
+#         cost2 = F.softplus(100 * (radius - dist2), beta=1, threshold=20)
+#         cost3 = F.softplus(100 * (radius - dist3), beta=1, threshold=20)
+#         return (cost1 + cost2 + cost3).reshape(*Bs)
 
 class WellPotential(LagrangianPotentialBase):
     def __call__(self, x):
@@ -274,10 +302,10 @@ class VNeck_Potential(LagrangianPotentialBase):
     M_bounds = (0., 0.1)
     temp_bounds = (1., 0.1)
 
-    x_axes_bounds = (-3., 3.)
-    y_axes_bounds = (-5., 5.)
+    x_axes_bounds = (-12., 12.)
+    y_axes_bounds = (-12., 12.)
     
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck', mean_left=-1.5, mean_right=1.5, height=1.25)
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck', mean_left=-8.5, mean_right=8.5, height=3.25)
     
     def get_samples(self, size, key):
         box_sampler = self.sampler_func(batch_size=size, key=key)
@@ -287,12 +315,12 @@ class VNeck_Potential(LagrangianPotentialBase):
         return source_data, target_data
     
     def __call__(self, x):
-        assert x.ndim == 1 and x.shape[0] == self.D
+        #assert x.ndim == 1 and x.shape[0] == self.D
 
         xs_sq = x*x
         d = self.coef * xs_sq[0] - xs_sq[1]
-
-        return - self.M * jax.nn.sigmoid((-self.c_sq - d) / self.temp)
+        return jax.nn.sigmoid((-self.c_sq - d))*1_000#, beta=1, threshold=20)
+        # return self.M * my_softplus((-self.c_sq - d) / self.temp, beta=1, threshold=20) * 3000
 
 
 class STunnel_Potential(LagrangianPotentialBase):
