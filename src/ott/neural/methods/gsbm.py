@@ -130,7 +130,7 @@ class GSBM(PyTreeNode):
     def create(cls, 
             T_mean=15, # number of knots for mean spline
             T_gamma=30, # number of knots for gamma spline 
-            sigma: float = 1.0,
+            sigma: float = 0.9,
             lr_mean: float = 3e-4,
             lr_gamma: float = 3e-4,
             potential=None):
