@@ -28,7 +28,7 @@ from datetime import datetime
 
 from sphinx.util import logging as sphinx_logging
 
-import ott
+import ott2
 
 # -- Project information -----------------------------------------------------
 needs_sphinx = "4.0"
@@ -38,8 +38,8 @@ author = "OTT authors"
 copyright = f"2021-{datetime.now():%Y}, {author}"
 
 # The full version, including alpha/beta/rc tags
-release = ott.__version__
-version = ott.__version__
+release = ott2.__version__
+version = ott2.__version__
 
 # -- General configuration ---------------------------------------------------
 
