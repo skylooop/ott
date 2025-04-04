@@ -189,7 +189,7 @@ class LagrangianFlow(StraightFlow):
       self, t: jnp.ndarray, src: jnp.ndarray, tgt: jnp.ndarray, correction_model
   ) -> jnp.ndarray:
     x_t = (1.0 - t) * src + t * tgt  
-    return x_t + t * (1 - t) * correction_model(t, src, tgt)
+    return x_t
 
   def compute_sigma_t(self, t: jnp.ndarray) -> jnp.ndarray:
     return self.sigma * jnp.sqrt(t * (1 - t))
