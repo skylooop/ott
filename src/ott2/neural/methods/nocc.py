@@ -47,9 +47,11 @@ class NeuralOC:
       value_model: nn.Module,
       optimizer: Optional[optax.GradientTransformation],
       flow: dynamics.LagrangianFlow,
+      control_steps: int,
       potential_weight: float,
       control_weight: float,
       reg_weight: float,
+      acc_weight: float,
       time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
       key:Optional[jax.Array] = None,
       **kwargs: Any,
@@ -60,6 +62,8 @@ class NeuralOC:
     self.potential_weight = potential_weight
     self.control_weight = control_weight
     self.reg_weight = reg_weight
+    self.acc_weight = acc_weight
+    self.control_steps = control_steps
    
     key, init_key = jax.random.split(key, 2)
     params = value_model.init(
@@ -105,23 +109,41 @@ class NeuralOC:
         U_t = self.flow.compute_potential(t, x_t)
 
         dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
-        dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
-
+        # dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
+        
         dsdt, dsdx = dsdtdx_fn(params, t, x_t, x_t)
         dsdt_tgt, dsdx_tgt = dsdtdx_fn(target_state.params, t, x_t, x_t)
         u = dsdx_tgt
         vt = dsdt_tgt
 
+        def normalize(x):
+          norm = jnp.linalg.norm(x) + 1e-5
+          return x / norm
+
+        @partial(jax.vmap, in_axes=(None, 0, 0, 0))
+        def acceleration(p, t, x, x0):
+            fun = lambda __t, __x: state.apply_fn(p,__t,__x,x0).sum()
+            norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
+            return jax.jacfwd(norm_rev, argnums=0)(t, x).squeeze()
+        
+        a = acceleration(params, t, x_t, x_t)
+        a_tgt = acceleration(target_state.params, t, x_t, x_t)
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
             fun = lambda __x: state.apply_fn(p,t,__x,x0).sum()
             return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
+        
+        # vddx_target = laplacian(target_state.params, t, x_t, x_t).reshape(-1, 1)
+        vddx = laplacian(params, t, x_t, x_t).reshape(-1, 1)
+        a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).sum(-1, keepdims=True)) * self.acc_weight
+        # a_cost = jnp.sqrt((a * a).sum(-1, keepdims=True)) * self.acc_weight
+        potential_cost = self.potential_weight * U_t.reshape(-1, 1)
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
-        s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
-        s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
-        loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
+        s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
+        s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
+        loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean() 
 
         loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True)).mean() * self.reg_weight
 
@@ -160,7 +182,7 @@ class NeuralOC:
         state = state.apply_gradients(grads=grads)
 
         grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, 20, 1.0, source, target)
+        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
         state = state.apply_gradients(grads=potential_grads)
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
@@ -176,7 +198,7 @@ class NeuralOC:
         state = state.apply_gradients(grads=grads)
         
         grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, 20, 1.0, source, target)
+        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
         state = state.apply_gradients(grads=potential_grads)
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
@@ -225,7 +247,7 @@ class NeuralOC:
       self.x_buffer[:x_seq.shape[0]] = np.asarray(x_seq)
       self.t_buffer = np.roll(self.t_buffer, x_seq.shape[0], axis=0)
       self.t_buffer[:x_seq.shape[0]] = np.asarray(t_seq)
-      self.buffer_size = min(self.buffer_size + x_seq.shape[0], 1000_000)
+      self.buffer_size = min(self.buffer_size + x_seq.shape[0], 100_000)
 
       
       if it % 5_000 == 0 and it > 0 and callback is not None:
@@ -245,9 +267,9 @@ class NeuralOC:
       **kwargs: Any,
   ) -> jnp.ndarray:
     
-    dt = 1.0 / 20
+    dt = 1.0 / self.control_steps
     t_0 = 0.0
-    n = 20
+    n = self.control_steps
     loop_key = jax.random.PRNGKey(0)
   
     @jax.jit
