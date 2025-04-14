@@ -11,29 +11,76 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-from typing import NamedTuple, Any
+# import diffrax
+from functools import partial
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+)
+
+from tqdm import tqdm
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tqdm import tqdm
 
-# import diffrax
-from functools import partial
-from flax.training import train_state
+import optax
 from flax import linen as nn
 from flax import struct
-import optax
+from flax.training import train_state
+
 from ott2 import utils
 from ott2.neural.methods.flows import dynamics
 from ott2.solvers import utils as solver_utils
-from flax.training import train_state
 
 __all__ = ["NeuralOC"]
 
 
 Callback_t = Callable[[int, ], None]
+
+class TrajectoryBuffer:
+    def __init__(self, capacity: int, shape: tuple[int]=()):
+        self.capacity = capacity
+        self.storage = np.empty([capacity, *shape])
+
+        self.curr_idx = 0
+        self.is_full = False
+
+    def __getitem__(self, idx):
+        return self.storage[idx]
+    
+    def append(self, x: np.ndarray):
+        assert x.ndim == self.storage.ndim
+        if self.curr_idx + x.shape[0] <= self.capacity:
+            self.storage[self.curr_idx : self.curr_idx + x.shape[0]] = x
+            
+            self.curr_idx += x.shape[0]
+            if self.curr_idx == self.capacity:
+                self.curr_idx = 0
+                self.is_full = True
+        else:
+            x1_size = self.capacity - self.curr_idx
+            x2_size = x.shape[0] - x1_size
+
+            self.storage[self.curr_idx : self.curr_idx + x1_size] = x[:x1_size]
+            self.storage[:x2_size] = x[x1_size:]
+
+            self.curr_idx = x2_size
+            self.is_full = True
+    
+    @property
+    def size(self):
+        if self.is_full:
+            return self.capacity
+        else:
+            return self.curr_idx
+
 
 class TimedX(struct.PyTreeNode):
   t: jnp.ndarray
@@ -85,9 +132,8 @@ class NeuralOC:
       tx=optax.identity()
     )
 
-    self.x_buffer = np.empty([1000_000, input_dim])
-    self.t_buffer = np.empty([1000_000])
-    self.buffer_size = 0 
+    self.x_buffer = TrajectoryBuffer(capacity=100_000, shape=(input_dim,))
+    self.t_buffer = TrajectoryBuffer(capacity=100_000)
 
     self.train_step_cost, self.train_step_with_potential = self._get_step_fn()
 
@@ -105,7 +151,6 @@ class NeuralOC:
         
         x_t = x_sample
         t = t_sample.reshape(-1, 1)
-        At_T = self.flow.compute_inverse_control_matrix(t, x_t).transpose()
         U_t = self.flow.compute_potential(t, x_t)
 
         dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
@@ -141,11 +186,11 @@ class NeuralOC:
         potential_cost = self.potential_weight * U_t.reshape(-1, 1)
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
-        s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
-        s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
+        s_diff_1 = dsdt - 0.5 * (u * u).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
+        s_diff_2 = vt - 0.5 * (dsdx * dsdx).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
         loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean() 
 
-        loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True)).mean() * self.reg_weight
+        loss += (- dsdt + 0.5 * (dsdx * dsdx).sum(-1, keepdims=True)).mean() * self.reg_weight
 
         return loss * self.control_weight
 
@@ -160,10 +205,9 @@ class NeuralOC:
         def move(carry, _):
           t_, x_, key_ = carry
           _, dsdx = dsdtdx_fn(state.params, t_, x_, x_0)
-          At_T = self.flow.compute_inverse_control_matrix(t_, x_).transpose()
           sigma = self.flow.compute_sigma_t(t_)
           key_, key_s = jax.random.split(key_)
-          x_next = x_ - dt * dsdx @ At_T + sigma * jax.random.normal(key_s, shape=x_.shape) * dt
+          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * dt
           t_next = t_ + dt
           return (t_next, x_next, key_), TimedX(t_, x_)
         
@@ -231,7 +275,7 @@ class NeuralOC:
       it_key = jax.random.fold_in(loop_key, it)
 
       if it > 10_000 and it % 4 != 0:
-          ids = np.random.randint(0, self.buffer_size, src.shape[0])
+          ids = np.random.randint(0, self.t_buffer.size, src.shape[0])
           t_sample = self.t_buffer[ids]
           x_sample = self.x_buffer[ids]
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state)
@@ -243,13 +287,9 @@ class NeuralOC:
 
       x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
       t_seq = tx_seq.t.reshape(-1)
-      self.x_buffer = np.roll(self.x_buffer, x_seq.shape[0], axis=0)
-      self.x_buffer[:x_seq.shape[0]] = np.asarray(x_seq)
-      self.t_buffer = np.roll(self.t_buffer, x_seq.shape[0], axis=0)
-      self.t_buffer[:x_seq.shape[0]] = np.asarray(t_seq)
-      self.buffer_size = min(self.buffer_size + x_seq.shape[0], 100_000)
+      self.x_buffer.append(x_seq)
+      self.t_buffer.append(t_seq)
 
-      
       if it % 5_000 == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
         pbar.set_postfix({"pot_loss": loss_potential,
@@ -280,13 +320,12 @@ class NeuralOC:
       def move(carry, _):
         t_, x_, cost, key_ = carry
         u = dsdx_fn(state.params, t_ * jnp.ones([x.shape[0],1]), x_, x_0)
-        At_T = self.flow.compute_inverse_control_matrix(t_, x_).transpose()
         U_t = self.flow.compute_potential(t_, x_)
         sigma = self.flow.compute_sigma_t(t_)
         key_, key_s = jax.random.split(key_)
-        x_ = x_ - dt * u @ At_T + sigma * jax.random.normal(key_s, shape=x_.shape) * dt
+        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * dt
         t_ = t_ + dt
-        cost += 0.5 * ((u @ At_T) * u).sum(-1).mean() * dt + U_t.mean() * dt * self.potential_weight
+        cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt * self.potential_weight
         return (t_, x_, cost, key_), x_
           
       (_, _, cost, _), result = jax.lax.scan(move, (t_0, x_0, 0.0, loop_key), None, length=n)
@@ -300,3 +339,4 @@ class NeuralOC:
       x_seq.append(TimedX(t=t_, x=result[i]))
       
     return cost, x_seq
+
