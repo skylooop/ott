@@ -24,6 +24,7 @@ from typing import (
     Tuple,
 )
 
+import flashbax as fbx
 from tqdm import tqdm
 
 import jax
@@ -45,41 +46,42 @@ __all__ = ["NeuralOC"]
 Callback_t = Callable[[int, ], None]
 
 class TrajectoryBuffer:
-    def __init__(self, capacity: int, shape: tuple[int]=()):
-        self.capacity = capacity
-        self.storage = np.empty([capacity, *shape])
+    def __init__(
+        self,
+        capacity: int,
+        dim: int,
+        batch_size: int,
+        seed: int=0
+    ):
+        buffer = fbx.make_item_buffer(
+            min_length=1,
+            max_length=capacity,
+            sample_batch_size=batch_size,
+            add_batches=True,
+        )
+        buffer = buffer.replace(
+            init = jax.jit(buffer.init),
+            add = jax.jit(buffer.add, donate_argnums=0),
+            sample = jax.jit(buffer.sample),
+            can_sample = jax.jit(buffer.can_sample),
+        )
 
-        self.curr_idx = 0
-        self.is_full = False
+        init_sample = {"x": np.random.randn(dim), "t": np.random.randn()} 
+        state = buffer.init(init_sample)
 
-    def __getitem__(self, idx):
-        return self.storage[idx]
+        self.buffer = buffer
+        self.state = state
+        self.rng = jax.random.key(seed)
     
-    def append(self, x: np.ndarray):
-        assert x.ndim == self.storage.ndim
-        if self.curr_idx + x.shape[0] <= self.capacity:
-            self.storage[self.curr_idx : self.curr_idx + x.shape[0]] = x
-            
-            self.curr_idx += x.shape[0]
-            if self.curr_idx == self.capacity:
-                self.curr_idx = 0
-                self.is_full = True
-        else:
-            x1_size = self.capacity - self.curr_idx
-            x2_size = x.shape[0] - x1_size
-
-            self.storage[self.curr_idx : self.curr_idx + x1_size] = x[:x1_size]
-            self.storage[:x2_size] = x[x1_size:]
-
-            self.curr_idx = x2_size
-            self.is_full = True
+    def append(self, x: np.ndarray, t: np.ndarray):
+        self.state = self.buffer.add(
+            self.state,
+            {"x": x, "t": t}
+        )
     
-    @property
-    def size(self):
-        if self.is_full:
-            return self.capacity
-        else:
-            return self.curr_idx
+    def sample(self):
+        self.rng, key = jax.random.split(self.rng)
+        return self.buffer.sample(self.state, key).experience
 
 
 class TimedX(struct.PyTreeNode):
@@ -99,6 +101,7 @@ class NeuralOC:
       control_weight: float,
       reg_weight: float,
       acc_weight: float,
+      batch_size: int,
       time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
       key:Optional[jax.Array] = None,
       **kwargs: Any,
@@ -132,8 +135,11 @@ class NeuralOC:
       tx=optax.identity()
     )
 
-    self.x_buffer = TrajectoryBuffer(capacity=100_000, shape=(input_dim,))
-    self.t_buffer = TrajectoryBuffer(capacity=100_000)
+    self.buffer = TrajectoryBuffer(
+      capacity=100_000,
+      dim=input_dim,
+      batch_size=batch_size,
+    )
 
     self.train_step_cost, self.train_step_with_potential = self._get_step_fn()
 
@@ -275,9 +281,8 @@ class NeuralOC:
       it_key = jax.random.fold_in(loop_key, it)
 
       if it > 10_000 and it % 4 != 0:
-          ids = np.random.randint(0, self.t_buffer.size, src.shape[0])
-          t_sample = self.t_buffer[ids]
-          x_sample = self.x_buffer[ids]
+          _sample = self.buffer.sample()
+          x_sample, t_sample = _sample["x"], _sample["t"]
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state)
       else:
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_with_potential(self.state, it_key, src, tgt, self.target_state)
@@ -287,8 +292,7 @@ class NeuralOC:
 
       x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
       t_seq = tx_seq.t.reshape(-1)
-      self.x_buffer.append(x_seq)
-      self.t_buffer.append(t_seq)
+      self.buffer.append(x=x_seq, t=t_seq)
 
       if it % 5_000 == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
@@ -339,4 +343,3 @@ class NeuralOC:
       x_seq.append(TimedX(t=t_, x=result[i]))
       
     return cost, x_seq
-
