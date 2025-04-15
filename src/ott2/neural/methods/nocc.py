@@ -269,6 +269,7 @@ class NeuralOC:
       update_potential_every: int = 1,
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
+      eval_every: int = 5_000,
   ) -> Dict[str, List[float]]:
 
     loop_key = utils.default_prng_key(rng)
@@ -289,14 +290,14 @@ class NeuralOC:
       else:
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_with_potential(self.state, it_key, src, tgt, self.target_state)
       
-      training_logs["potential_loss"].append(loss_potential)
-      training_logs["cost_loss"].append(loss)
+      training_logs["potential_loss"].append(loss_potential.item())
+      training_logs["cost_loss"].append(loss.item())
 
       x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
       t_seq = tx_seq.t.reshape(-1)
       self.buffer.append(x=x_seq, t=t_seq)
 
-      if it % 5_000 == 0 and it > 0 and callback is not None:
+      if it % eval_every == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
         pbar.set_postfix({"pot_loss": loss_potential,
                           "cost_loss": loss})
