@@ -265,10 +265,12 @@ class NeuralOC:
       loader: Iterable[Dict[str, np.ndarray]],
       *,
       n_iters: int,
+      collect_buffer_iters: int = 0,
+      update_potential_every: int = 1,
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
   ) -> Dict[str, List[float]]:
-    
+
     loop_key = utils.default_prng_key(rng)
     training_logs = {"cost_loss": [], "potential_loss": []}
     it = 0
@@ -280,7 +282,7 @@ class NeuralOC:
       # src_cond = batch.get("src_condition")
       it_key = jax.random.fold_in(loop_key, it)
 
-      if it > 10_000 and it % 4 != 0:
+      if it > collect_buffer_iters and it % update_potential_every != 0:
           _sample = self.buffer.sample()
           x_sample, t_sample = _sample["x"], _sample["t"]
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state)
