@@ -141,10 +141,10 @@ class LagrangianPotentialFree(PyTreeNode):
 
 
 # training params
-batch_size = 16
-n_iters = 1_000_000
+batch_size = 32
+n_iters = 5_000_000
 collect_buffer_iters = 10_000
-update_potential_every = 4
+update_potential_every = 2
 eval_every = 2_000
 
 # data preparation
@@ -175,6 +175,8 @@ ot_loader = OTLoader(
     flatten_flag=True,
     shuffle=True,
     batch_size=batch_size,
+    num_workers=4,
+    drop_last=True,
 )
 ot_loader = iter(ot_loader)
 
