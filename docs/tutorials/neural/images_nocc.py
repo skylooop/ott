@@ -1,11 +1,16 @@
+import os
+
+CUDA_VISIBLE_DEVICES = "0,1,2,3,4,5,6,7"
+# CUDA_VISIBLE_DEVICES = "0,1,2,3"
+# CUDA_VISIBLE_DEVICES = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
+
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['JAX_PLATFORM_NAME'] = 'gpu'
 
 import sys
 
 sys.path.insert(0, "/home/jovyan/d-shlenskii/repos/skyloop/ott/src")
-
-import os
-
-os.environ['CUDA_VISIBLE_DEVICES']='2'
 
 import warnings
 
@@ -47,8 +52,8 @@ from ott2.neural.methods.flows.dynamics import LagrangianFlow
 from ott2.neural.methods.nocc import NeuralOC
 from ott2.neural.networks.resnet_d import ResNet_D
 
-GLOBAL_KEY = jax.random.key(42)
-EVAL_PATH = "/home/jovyan/d-shlenskii/repos/skyloop/ott/docs/tutorials/neural/images_nocc_log"
+GLOBAL_KEY = jax.random.key(42) 
+EVAL_PATH = "/home/jovyan/d-shlenskii/repos/skyloop/ott/docs/tutorials/neural/images_nocc_log_v2"
 
 
 # Data
@@ -141,11 +146,11 @@ class LagrangianPotentialFree(PyTreeNode):
 
 
 # training params
-batch_size = 32
-n_iters = 5_000_000
+batch_size = 64
+n_iters = 500_001
 collect_buffer_iters = 10_000
-update_potential_every = 2
-eval_every = 2_000
+update_potential_every = 4
+eval_every = 5_000
 
 # data preparation
 img_size, nc = 64, 3
@@ -170,8 +175,8 @@ celeba_female_dataset = Subset(celeba_female_dataset, idx)
 
 ## loader
 ot_loader = OTLoader(
-    src_ds=anime_dataset,
-    trg_ds=celeba_female_dataset,
+    src_ds=celeba_female_dataset,
+    trg_ds=anime_dataset,
     flatten_flag=True,
     shuffle=True,
     batch_size=batch_size,

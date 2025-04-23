@@ -1,3 +1,9 @@
+import os
+
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['JAX_PLATFORM_NAME'] = 'gpu'
+NPROC = len(os.environ["CUDA_VISIBLE_DEVICES"].split(","))
+
 # Copyright OTT-JAX
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,6 +51,21 @@ __all__ = ["NeuralOC"]
 
 Callback_t = Callable[[int, ], None]
 
+from jax.experimental import mesh_utils
+
+# multigpu
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+P = PartitionSpec
+mesh = Mesh(mesh_utils.create_device_mesh((NPROC,)), axis_names=('data',))
+
+def with_mesh(f):
+    def wrapper(*args, **kwargs):
+        with mesh:
+            return f(*args, **kwargs)
+    return wrapper
+
+# buffer
 class TrajectoryBuffer:
     def __init__(
         self,
@@ -115,25 +136,24 @@ class NeuralOC:
     self.acc_weight = acc_weight
     self.control_steps = control_steps
    
-    key, init_key = jax.random.split(key, 2)
-    params = value_model.init(
-      init_key, 
-      jnp.ones([1, 1]), 
-      jnp.ones([1, input_dim]), 
-      jnp.ones([1, input_dim])
-    )
-  
-    self.state = train_state.TrainState.create(
-      apply_fn=value_model.apply,
-      params=params,
-      tx=optimizer
-    )
-
-    self.target_state = train_state.TrainState.create(
-      apply_fn=value_model.apply,
-      params=jax.tree.map(lambda x: jnp.copy(x), params),
-      tx=optax.identity()
-    )
+    with mesh:
+      key, init_key = jax.random.split(key, 2)
+      params = value_model.init(
+        init_key, 
+        jnp.ones([1, 1]), 
+        jnp.ones([1, input_dim]), 
+        jnp.ones([1, input_dim])
+      )
+      self.state = train_state.TrainState.create(
+        apply_fn=value_model.apply,
+        params=params,
+        tx=optimizer
+      )
+      self.target_state = train_state.TrainState.create(
+        apply_fn=value_model.apply,
+        params=jax.tree.map(lambda x: jnp.copy(x), params),
+        tx=optax.identity(),
+      )
 
     self.buffer = TrajectoryBuffer(
       capacity=100_000,
@@ -225,8 +245,14 @@ class NeuralOC:
 
         return (reg_loss + dual_loss)  * weight, result
 
+      @with_mesh
       @jax.jit
       def train_step_cost(state, key, source, target, t_sample, x_sample, target_state):
+        source = jax.lax.with_sharding_constraint(source, P('data'))
+        target = jax.lax.with_sharding_constraint(target, P('data'))
+        t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
+        x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
+
         grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
         loss, grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state)
         state = state.apply_gradients(grads=grads)
@@ -240,9 +266,12 @@ class NeuralOC:
         
         return state, loss, loss_potential, x_seq, target_state
 
-
+      @with_mesh
       @jax.jit
       def train_step_with_potential(state, key, source, target, target_state):
+        source = jax.lax.with_sharding_constraint(source, P('data'))
+        target = jax.lax.with_sharding_constraint(target, P('data'))
+
         grad_fn = jax.value_and_grad(am_loss, argnums=1, has_aux=False)
         loss, grads = grad_fn(state, state.params, key, source, target, target_state)
         state = state.apply_gradients(grads=grads)
@@ -319,6 +348,7 @@ class NeuralOC:
     n = self.control_steps
     loop_key = jax.random.PRNGKey(0)
   
+    @with_mesh
     @jax.jit
     def inference(state, x_0):
 
