@@ -95,14 +95,13 @@ class NeuralOC:
         x_0, x_1 = source, target
         x_t = self.flow.compute_xt(key_t, t, x_0, x_1)
         
-        return am_loss_sample(state, params, key_t, t, x_t, target_state)
+        return am_loss_sample(state, params, key_t, t, x_t, target_state, reg_weight=0)
       
-      def am_loss_sample(state, params, key_t, t_sample, x_sample, target_state):
+      def am_loss_sample(state, params, key_t, t_sample, x_sample, target_state, reg_weight):
         
         x_t = x_sample
         t = t_sample.reshape(-1, 1)
         At_T = self.flow.compute_inverse_control_matrix(t, x_t).transpose()
-        U_t = self.flow.compute_potential(t, x_t)
 
         dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
         dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
@@ -112,6 +111,9 @@ class NeuralOC:
         u = dsdx_tgt
         vt = dsdt_tgt
 
+        dt = 1.0 / 60
+        x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt
+        U_t = 0.5 * self.flow.compute_potential(t, x_t) + 0.5 * self.flow.compute_potential(t+dt, x_dt)
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
@@ -123,7 +125,7 @@ class NeuralOC:
         s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
         loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
 
-        loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True)).mean() * self.reg_weight
+        loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True)).mean() * reg_weight
 
         return loss * self.control_weight
 
@@ -156,11 +158,11 @@ class NeuralOC:
       @jax.jit
       def train_step_cost(state, key, source, target, t_sample, x_sample, target_state):
         grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
-        loss, grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state)
+        loss, grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, self.reg_weight)
         state = state.apply_gradients(grads=grads)
 
         grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, 20, 1.0, source, target)
+        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, 30, 1.0, source, target)
         state = state.apply_gradients(grads=potential_grads)
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
@@ -176,7 +178,7 @@ class NeuralOC:
         state = state.apply_gradients(grads=grads)
         
         grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, 20, 1.0, source, target)
+        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, 30, 1.0, source, target)
         state = state.apply_gradients(grads=potential_grads)
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
@@ -208,7 +210,7 @@ class NeuralOC:
       # src_cond = batch.get("src_condition")
       it_key = jax.random.fold_in(loop_key, it)
 
-      if it > 10_000 and it % 4 != 0:
+      if it > 15_000 and it % 4 != 0:
           ids = np.random.randint(0, self.buffer_size, src.shape[0])
           t_sample = self.t_buffer[ids]
           x_sample = self.x_buffer[ids]
@@ -219,8 +221,8 @@ class NeuralOC:
       training_logs["potential_loss"].append(loss_potential)
       training_logs["cost_loss"].append(loss)
 
-      x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
-      t_seq = tx_seq.t.reshape(-1)
+      x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])[::10]
+      t_seq = tx_seq.t.reshape(-1)[::10]
       self.x_buffer = np.roll(self.x_buffer, x_seq.shape[0], axis=0)
       self.x_buffer[:x_seq.shape[0]] = np.asarray(x_seq)
       self.t_buffer = np.roll(self.t_buffer, x_seq.shape[0], axis=0)
@@ -245,9 +247,9 @@ class NeuralOC:
       **kwargs: Any,
   ) -> jnp.ndarray:
     
-    dt = 1.0 / 20
+    dt = 1.0 / 30
     t_0 = 0.0
-    n = 20
+    n = 30
     loop_key = jax.random.PRNGKey(0)
   
     @jax.jit

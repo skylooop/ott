@@ -109,12 +109,12 @@ class SlitPotential(LagrangianPotentialBase):
         return U
 
 class BabyMazePotential(LagrangianPotentialBase):
-    xmin1: float = -0.5
+    xmin1: float = -0.6
     xmax1: float = -0.3
     ymin1: float = -1.99
     ymax1: float = -0.15
     xmin2: float = 0.3
-    xmax2: float = 0.5
+    xmax2: float = 0.6
     ymin2: float = 0.15
     ymax2: float = 1.99
     M_bounds = (0., 10.)
@@ -166,6 +166,15 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
     radius = 1.5
     M_bounds = (0., 0.1)
     temp_bounds = (1., 0.1)
+
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box')
+
+    def get_samples(self, size, key):
+        vneck_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(vneck_sampler))
+        source_data = sampler['src_lin']
+        target_data = sampler['tgt_lin']
+        return source_data, target_data
 
     def __call__(self, x):
         assert x.ndim == 1 and x.shape[0] == self.D
