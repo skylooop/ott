@@ -402,7 +402,7 @@ class ResNet_D(nn.Module):
 
         x = x.reshape(-1, self.nc, self.size, self.size).transpose(0, 2, 3, 1)
 
-        s0 = 4
+        s0 = int(self.size / 2**self.nlayers)
         nf = self.nfilter
         nf_max = self.nfilter_max
         

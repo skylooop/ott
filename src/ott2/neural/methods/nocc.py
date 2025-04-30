@@ -18,6 +18,7 @@ NPROC = len(os.environ["CUDA_VISIBLE_DEVICES"].split(","))
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # import diffrax
+import pickle
 from functools import partial
 from typing import (
     Any,
@@ -125,6 +126,7 @@ class NeuralOC:
       batch_size: int,
       time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
       key:Optional[jax.Array] = None,
+      load_dir: str = None,
       **kwargs: Any,
   ):
     self.value_model = value_model
@@ -135,6 +137,7 @@ class NeuralOC:
     self.reg_weight = reg_weight
     self.acc_weight = acc_weight
     self.control_steps = control_steps
+
    
     with mesh:
       key, init_key = jax.random.split(key, 2)
@@ -154,12 +157,33 @@ class NeuralOC:
         params=jax.tree.map(lambda x: jnp.copy(x), params),
         tx=optax.identity(),
       )
+      if not load_dir:
+        pass
+      elif not os.path.exists(load_dir):
+        print(f"Path does not exist: {load_dir}")
+      else:
+        with open(f"{load_dir}/opt_state_latest.pkl", "rb") as file:
+          opt_state = pickle.load(file)
+        with open(f"{load_dir}/params_latest.pkl", "rb") as file:
+          params = pickle.load(file)
+        with open(f"{load_dir}/step_latest.pkl", "rb") as file:
+          step = pickle.load(file)
+        self.state = self.state.replace(params=params, opt_state=opt_state, step=step)
+        self.target_state = self.target_state.replace(params=params, step=step)
+        print("opt_state + params + step: loaded")
+
 
     self.buffer = TrajectoryBuffer(
       capacity=100_000,
       dim=input_dim,
       batch_size=batch_size,
     )
+    if load_dir and os.path.exists(load_dir):
+        with open(f"{load_dir}/buffer_state_latest.pkl", "rb") as file:
+          buffer_state = pickle.load(file)
+          self.buffer.state = buffer_state
+          print("buffer_state: loaded")
+
 
     self.train_step_cost, self.train_step_with_potential = self._get_step_fn()
 
@@ -245,6 +269,26 @@ class NeuralOC:
 
         return (reg_loss + dual_loss)  * weight, result
 
+      def loss_fn(state, params, key, t_sample, x_sample, target_state, source, target):
+        control_loss_value = am_loss_sample(state, params, key, t_sample, x_sample, target_state)
+        potential_loss_value, x_seq = potential_loss(state, params, key, self.control_steps, 1.0, source, target)
+        loss_value = control_loss_value + potential_loss_value
+        return loss_value, {
+          "control_loss_value": control_loss_value,
+          "potential_loss_value": potential_loss_value,
+          "x_seq": x_seq,
+        }
+
+      def loss_with_potential_fn(state, params, key, target_state, source, target):
+        control_loss_value = am_loss(state, params, key, source, target, target_state)
+        potential_loss_value, x_seq = potential_loss(state, params, key, self.control_steps, 1.0, source, target)
+        loss_value = control_loss_value + potential_loss_value
+        return loss_value, {
+          "control_loss_value": control_loss_value,
+          "potential_loss_value": potential_loss_value,
+          "x_seq": x_seq,
+        }
+
       @with_mesh
       @jax.jit
       def train_step_cost(state, key, source, target, t_sample, x_sample, target_state):
@@ -253,18 +297,15 @@ class NeuralOC:
         t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
         x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
 
-        grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
-        loss, grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state)
+        grad_fn = jax.value_and_grad(loss_fn, argnums=1, has_aux=True)
+        (loss, info), grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, source, target)
         state = state.apply_gradients(grads=grads)
-
-        grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
-        state = state.apply_gradients(grads=potential_grads)
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
         target_state = target_state.replace(params=new_target_params)
         
-        return state, loss, loss_potential, x_seq, target_state
+        return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
+        # return state, loss, loss_potential, x_seq, target_state
 
       @with_mesh
       @jax.jit
@@ -272,18 +313,15 @@ class NeuralOC:
         source = jax.lax.with_sharding_constraint(source, P('data'))
         target = jax.lax.with_sharding_constraint(target, P('data'))
 
-        grad_fn = jax.value_and_grad(am_loss, argnums=1, has_aux=False)
-        loss, grads = grad_fn(state, state.params, key, source, target, target_state)
+        grad_fn = jax.value_and_grad(loss_with_potential_fn, argnums=1, has_aux=True)
+        (loss, info), grads = grad_fn(state, state.params, key, target_state, source, target)
         state = state.apply_gradients(grads=grads)
-        
-        grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
-        state = state.apply_gradients(grads=potential_grads)
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
         target_state = target_state.replace(params=new_target_params)
         
-        return state, loss, loss_potential, x_seq, target_state
+        return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
+        # return state, loss, loss_potential, x_seq, target_state
       
       
       return train_step_cost, train_step_with_potential
@@ -299,6 +337,7 @@ class NeuralOC:
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
       eval_every: int = 5_000,
+      save_dir: str = None,
   ) -> Dict[str, List[float]]:
 
     loop_key = utils.default_prng_key(rng)
@@ -307,7 +346,7 @@ class NeuralOC:
     pbar = tqdm(loader, total=n_iters, colour='green', dynamic_ncols=True)
     for batch in pbar:
       # batch = jtu.tree_map(jnp.asarray, batch)
-    
+
       src, tgt = batch["src_lin"], batch["tgt_lin"]
       # src_cond = batch.get("src_condition")
       it_key = jax.random.fold_in(loop_key, it)
@@ -318,7 +357,7 @@ class NeuralOC:
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state)
       else:
           self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_with_potential(self.state, it_key, src, tgt, self.target_state)
-      
+
       training_logs["potential_loss"].append(loss_potential.item())
       training_logs["cost_loss"].append(loss.item())
 
@@ -330,11 +369,28 @@ class NeuralOC:
         callback(it, training_logs, self.transport)
         pbar.set_postfix({"pot_loss": loss_potential,
                           "cost_loss": loss})
+        if save_dir is not None:
+          self.save(save_dir, it=it)
+
       it += 1
       if it >= n_iters:
         break
 
     return training_logs
+
+  def save(self, save_dir: str, it: int):
+    with open(f"{save_dir}/opt_state_step_{it}.pkl", "wb") as file:
+      pickle.dump(self.state.opt_state, file)
+    with open(f"{save_dir}/params_step_{it}.pkl", "wb") as file:
+      pickle.dump(self.state.params, file)
+    with open(f"{save_dir}/opt_state_latest.pkl", "wb") as file:
+      pickle.dump(self.state.opt_state, file)
+    with open(f"{save_dir}/params_latest.pkl", "wb") as file:
+      pickle.dump(self.state.params, file)
+    with open(f"{save_dir}/step_latest.pkl", "wb") as file:
+      pickle.dump(self.state.step, file)
+    with open(f"{save_dir}/buffer_state_latest.pkl", "wb") as file:
+      pickle.dump(self.buffer.state, file)
 
   def transport(
       self,
