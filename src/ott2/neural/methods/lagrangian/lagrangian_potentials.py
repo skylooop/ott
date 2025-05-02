@@ -167,10 +167,10 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
     M_bounds = (0., 0.1)
     temp_bounds = (1., 0.1)
 
-    x_axes_bounds = (-15., 15.)
-    y_axes_bounds = (-15., 15.)
+    x_axes_bounds = (-19., 19.)
+    y_axes_bounds = (-19., 19.)
 
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='stunnel')
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='gmm')
 
     def get_samples(self, size, key):
         vneck_sampler = self.sampler_func(batch_size=size, key=key)
@@ -186,7 +186,6 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
         for i in range(self.centers.shape[0]):
             dist = jnp.linalg.norm(x - self.centers[i])
             V -= nn.softplus(100 * (self.radius - dist))
-
 
         return V
 
@@ -219,8 +218,8 @@ class VNeck_Potential(LagrangianPotentialBase):
 
 class VNeck_bench(LagrangianPotentialBase):
 
-    x_axes_bounds = (-10., 10.)
-    y_axes_bounds = (-10., 10.)
+    x_axes_bounds = (-8., 8.)
+    y_axes_bounds = (-2., 2.)
 
     sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck')
     
@@ -247,9 +246,10 @@ class VNeck_bench(LagrangianPotentialBase):
         xt_sq = xt * xt
         d = coef * xt_sq[0] - xt_sq[1]
 
-        # cond = jnp.astype(-c_sq - d < 20, jnp.int32)
+        cond = jnp.astype(jax.nn.softplus((-c_sq - d)) > 0.53, jnp.int32)
+        cond_1 = jnp.astype(jax.nn.softplus((-c_sq - d)) < 5, jnp.int32)
 
-        return -jax.nn.softplus(-c_sq - d) 
+        return -jax.nn.softplus((-c_sq - d)) * cond * cond_1 - 5 * (1 - cond_1)
     
 
 class STunnel_bench(LagrangianPotentialBase):

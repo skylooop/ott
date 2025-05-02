@@ -81,12 +81,16 @@ class GaussianMixture:
             np.array([[0, 0], [1, 1], [-1, 1], [-1, -1], [1, -1]]),
         "square_four":
             np.array([[1, 0], [0, 1], [-1, 0], [0, -1]]),
+        "pi0":  np.array([[4., 0.], [0., 4.], [-4., 0.,], [0., -4.]]),
+        "pi1":  np.array([[16, 0], [11.31, 11.31], [0, 16,], [-11.31, 11.31], [-16, 0], [-11.31, -11.31], [0, -16], [11.31, -11.31]])
     }
-    if self.name not in gaussian_centers:
-      raise ValueError(
-          f"{self.name} is not a valid dataset for GaussianMixture"
-      )
-    self.centers = gaussian_centers[self.name]
+    # if self.name not in gaussian_centers:
+    #   raise ValueError(
+    #       f"{self.name} is not a valid dataset for GaussianMixture"
+    #   )
+    # self.centers = gaussian_centers[self.name]
+    self.centers_src = gaussian_centers["pi0"]
+    self.centers_tgt = gaussian_centers["pi1"]
 
   def __iter__(self) -> Iterator[jnp.array]:
     """Random sample generator from Gaussian mixture.
@@ -100,10 +104,16 @@ class GaussianMixture:
     rng = self.rng
     while True:
       rng1, rng2, rng = jax.random.split(rng, 3)
-      means = jax.random.choice(rng1, self.centers, (self.batch_size,))
+      means = jax.random.choice(rng1, self.centers_src, (self.batch_size,))
       normal_samples = jax.random.normal(rng2, (self.batch_size, 2))
-      samples = self.scale * means + (self.std ** 2) * normal_samples
-      yield samples
+      source_samples = self.scale * means + self.std * normal_samples
+
+      rng1, rng2, rng = jax.random.split(rng, 3)
+      means = jax.random.choice(rng1, self.centers_tgt, (self.batch_size,))
+      normal_samples = jax.random.normal(rng2, (self.batch_size, 2))
+      target_samples = self.scale * means + self.std * normal_samples
+      
+      yield {"src_lin": source_samples, 'tgt_lin': target_samples}
 
 
 def create_gaussian_mixture_samplers(
@@ -205,6 +215,7 @@ class Gaussian:
             target_samples = self.target_mean + self.target_var * target_normal_samples
 
             yield {"src_lin": source_samples, 'tgt_lin': target_samples}
+
             
 def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
   if geometry_str == "babymaze":
@@ -217,7 +228,7 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
     return UniformLineDataset(size=batch_size)
   
   elif geometry_str == "vneck":
-    variance = 0.5
+    variance = 0.2
     source_mean = jnp.array([-7, 0.0])
     target_mean = jnp.array([7, 0.0])
   
@@ -236,6 +247,9 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
     variance = 0.5
     source_mean = jnp.array([-11.0, -1.0])
     target_mean = jnp.array([11.0, 1.0])
+
+  elif geometry_str == "gmm":
+    return GaussianMixture("", batch_size=batch_size, rng=key, scale=1.0, std=1.0)
 
     
   return Gaussian(source_mean=source_mean, source_var=variance,
