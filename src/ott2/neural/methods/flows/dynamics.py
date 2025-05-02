@@ -192,6 +192,26 @@ class LagrangianFlow(StraightFlow):
     return x_t
 
   def compute_sigma_t(self, t: jnp.ndarray) -> jnp.ndarray:
+    return self.sigma * jnp.ones_like(t)
+
+  def compute_inverse_control_matrix(self, t: jnp.ndarray, x_t: jnp.ndarray) -> jnp.ndarray:
+    return jnp.eye(x_t.shape[-1], x_t.shape[-1])
+
+  def compute_potential(self, t: jnp.ndarray, x_t: jnp.ndarray) -> jnp.ndarray:
+    if self.potential is not None:
+      return jax.vmap(self.potential)(x_t)
+    return 0
+
+
+class SchredingerFlow(StraightFlow):
+
+  def compute_mu_t(  # noqa: D102
+      self, t: jnp.ndarray, src: jnp.ndarray, tgt: jnp.ndarray, correction_model
+  ) -> jnp.ndarray:
+    x_t = (1.0 - t) * src + t * tgt  
+    return x_t
+
+  def compute_sigma_t(self, t: jnp.ndarray) -> jnp.ndarray:
     return self.sigma * jnp.sqrt(t * (1 - t))
 
   def compute_inverse_control_matrix(self, t: jnp.ndarray, x_t: jnp.ndarray) -> jnp.ndarray:

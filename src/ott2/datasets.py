@@ -217,9 +217,9 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
     return UniformLineDataset(size=batch_size)
   
   elif geometry_str == "vneck":
-    variance = 0.15
-    source_mean = jnp.array([-2.5, 0.0])
-    target_mean = jnp.array([2.5, 0.0])
+    variance = 0.5
+    source_mean = jnp.array([-7, 0.0])
+    target_mean = jnp.array([7, 0.0])
   
   elif geometry_str == "slit":
     return UniformLineDataset(size=batch_size)
@@ -235,7 +235,8 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
   elif geometry_str == "stunnel":
     variance = 0.5
     source_mean = jnp.array([-11.0, -1.0])
-    target_mean = jnp.array([11.0, -1.0])
+    target_mean = jnp.array([11.0, 1.0])
+
     
   return Gaussian(source_mean=source_mean, source_var=variance,
                   target_mean=target_mean, target_var=variance, batch_size=batch_size, init_key=key)

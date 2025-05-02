@@ -167,7 +167,10 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
     M_bounds = (0., 0.1)
     temp_bounds = (1., 0.1)
 
-    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box')
+    x_axes_bounds = (-15., 15.)
+    y_axes_bounds = (-15., 15.)
+
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='stunnel')
 
     def get_samples(self, size, key):
         vneck_sampler = self.sampler_func(batch_size=size, key=key)
@@ -182,7 +185,9 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
         V = 0.
         for i in range(self.centers.shape[0]):
             dist = jnp.linalg.norm(x - self.centers[i])
-            V -= self.M * nn.sigmoid((self.radius - dist) / self.temp)
+            V -= nn.softplus(100 * (self.radius - dist))
+
+
         return V
 
 class VNeck_Potential(LagrangianPotentialBase):
@@ -210,6 +215,87 @@ class VNeck_Potential(LagrangianPotentialBase):
         d = self.coef * xs_sq[0] - xs_sq[1]
 
         return - self.M * nn.sigmoid((-self.c_sq - d) / self.temp)
+    
+
+class VNeck_bench(LagrangianPotentialBase):
+
+    x_axes_bounds = (-10., 10.)
+    y_axes_bounds = (-10., 10.)
+
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='vneck')
+    
+    def get_samples(self, size, key):
+        box_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(box_sampler))
+        source_data = sampler['src_lin']
+        target_data = sampler['tgt_lin']
+        return source_data, target_data
+
+
+    def obstacle_cfg_vneck(self):
+        c_sq = 0.36
+        coef = 5
+        return c_sq, coef
+
+
+    def __call__(self, xt):
+    
+        assert xt.shape[-1] == 2
+
+        c_sq, coef = self.obstacle_cfg_vneck()
+
+        xt_sq = xt * xt
+        d = coef * xt_sq[0] - xt_sq[1]
+
+        # cond = jnp.astype(-c_sq - d < 20, jnp.int32)
+
+        return -jax.nn.softplus(-c_sq - d) 
+    
+
+class STunnel_bench(LagrangianPotentialBase):
+
+    x_axes_bounds = (-13, 13)
+    y_axes_bounds = (-13, 13)
+
+
+    sampler_func = functools.partial(create_lagrangian_ds, geometry_str='stunnel')
+    
+    def get_samples(self, size, key):
+        box_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(iter(box_sampler))
+        source_data = sampler['src_lin']
+        target_data = sampler['tgt_lin']
+        return source_data, target_data
+
+
+    def obstacle_cfg(self):
+        a, b, c = 20, 1, 90
+        centers = [[5, 6], [-5, -6]]
+        return a, b, c, centers
+
+
+    def __call__(self, xt):
+
+
+        a, b, c, centers = self.obstacle_cfg()
+
+        D = xt.shape[0]
+        assert D == 2
+
+        _xt = xt.reshape(D)
+        x, y = _xt[0], _xt[1]
+
+        d = a * (x - centers[0][0]) ** 2 + b * (y - centers[0][1]) ** 2
+        # c1 = 1500 * (d < c)
+        c1 = nn.softplus(c - d)
+
+        d = a * (x - centers[1][0]) ** 2 + b * (y - centers[1][1]) ** 2
+        # c2 = 1500 * (d < c)
+        c2 = nn.softplus(c - d)
+
+        cost = (c1 + c2)
+        return -cost
+
 
 
 class STunnel_Potential(LagrangianPotentialBase):
