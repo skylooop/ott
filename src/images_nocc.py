@@ -231,7 +231,7 @@ from tools.fid import (
 
 inception_net = inception.InceptionV3(pretrained=True)
 rng = jax.random.PRNGKey(0)
-inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3)))
+inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3))) # TODO: WHY?
 inception_apply = jax.jit(functools.partial(inception_net.apply, train=False))
 
 mu_path = "experiments/mu_data.npy"
@@ -261,7 +261,7 @@ test_celeba_female_loader = DataLoader(
 )
 
 def callback(step, training_logs, transport):
-    # # Compute FID
+    # # # Compute FID
     # mu, sigma = get_pushed_loader_stats(
     #     transport, test_celeba_female_loader, inception_apply, inception_params, batch_size=64, verbose=True, upgrade=False
     # )

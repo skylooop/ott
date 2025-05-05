@@ -448,7 +448,7 @@ class NeuralOC:
         U_t = self.flow.compute_potential(t_, x_)
         sigma = self.flow.compute_sigma_t(t_)
         key_, key_s = jax.random.split(key_)
-        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**2
+        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**0.5
         t_ = t_ + dt
         cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt * self.potential_weight
         return (t_, x_, cost, key_), x_
