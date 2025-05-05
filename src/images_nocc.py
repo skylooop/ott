@@ -253,20 +253,23 @@ else:
         mu_data = np.load(file)
     with open(sigma_path, "rb") as file:
         sigma_data = np.load(file)
+
+test_batch_size = 512
 test_celeba_female_loader = DataLoader(
     test_celeba_female_dataset,
     shuffle=False,
-    batch_size=batch_size,
+    batch_size=test_batch_size,
     num_workers=4,
 )
 
 def callback(step, training_logs, transport):
     # # # Compute FID
-    # mu, sigma = get_pushed_loader_stats(
-    #     transport, test_celeba_female_loader, inception_apply, inception_params, batch_size=64, verbose=True, upgrade=False
-    # )
-    # fid = calculate_frechet_distance(mu_data, sigma_data, mu, sigma)
-    # print(fid)
+    mu, sigma = get_pushed_loader_stats(
+        transport, test_celeba_female_loader, inception_apply, inception_params, batch_size=test_batch_size, verbose=True, upgrade=False
+    )
+    fid = calculate_frechet_distance(mu_data, sigma_data, mu, sigma)
+    with open(f"{SAVE_DIR}/FID.txt", "a") as file:
+        file.write(f"{fid}\n")
 
     # Visualization
     ## sample batch

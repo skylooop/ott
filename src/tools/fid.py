@@ -80,23 +80,16 @@ def get_pushed_loader_stats(T, loader, inception_fn, inception_params, batch_siz
             for i in range(0, len(X), batch_size):
                 start, end = i, min(i + batch_size, len(X))
                 img_size = X.shape[-1]
-                t0 = time()
-                inp = X[start:end].numpy().reshape(end - start, 3 * img_size * img_size)
-                t1 = time()
                 batch = T(
-                    inp
-                )
-                # )[1][-1].x.reshape(end - start, 3, img_size, img_size)
-                t2 = time()
-                # batch = batch * 0.5 + 0.5
-                # batch = batch.transpose(0, 2, 3, 1)
-                # pred_arr.append(np.asarray(inception_fn(inception_params, batch)).reshape(end-start, -1))
-                t3 = time()
-                print(f"{t1 - t0 = }", f"{t2 - t1 = }", f"{t3 - t2 = }")
+                    X[start:end].numpy().reshape(end - start, 3 * img_size * img_size)
+                )[1][-1].x.reshape(end - start, 3, img_size, img_size)
+                batch = batch * 0.5 + 0.5
+                batch = batch.transpose(0, 2, 3, 1)
+                pred_arr.append(np.asarray(inception_fn(inception_params, batch)).reshape(end-start, -1))
 
     pred_arr = np.vstack(pred_arr)
     mu, sigma = np.mean(pred_arr, axis=0), np.cov(pred_arr, rowvar=False)
-    gc.collect(); torch.cuda.empty_cache()
+    gc.collect()
     return mu, sigma
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):

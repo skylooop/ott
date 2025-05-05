@@ -435,9 +435,8 @@ class NeuralOC:
     @jax.jit
     def inference(state, x_0):
 
-      the_ones = jnp.ones([x.shape[0],1])
       x_0 = jax.lax.with_sharding_constraint(x_0, P('data'))
-      the_ones = jax.lax.with_sharding_constraint(the_ones, P('data'))
+      the_ones = jnp.ones([x.shape[0],1])
 
       dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
       
