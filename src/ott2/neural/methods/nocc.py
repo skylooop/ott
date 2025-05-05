@@ -138,7 +138,6 @@ class NeuralOC:
     self.acc_weight = acc_weight
     self.control_steps = control_steps
 
-   
     with mesh:
       key, init_key = jax.random.split(key, 2)
       params = value_model.init(
@@ -242,7 +241,7 @@ class NeuralOC:
 
         loss += (- dsdt + 0.5 * (dsdx * dsdx).sum(-1, keepdims=True)).mean() * self.reg_weight
 
-        return loss * self.control_weight
+        return loss
 
       def potential_loss(state, params, key, steps_count, weight, source, target):
         bs = source.shape[0]
@@ -257,7 +256,7 @@ class NeuralOC:
           _, dsdx = dsdtdx_fn(state.params, t_, x_, x_0)
           sigma = self.flow.compute_sigma_t(t_)
           key_, key_s = jax.random.split(key_)
-          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * dt
+          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**0.5
           t_next = t_ + dt
           return (t_next, x_next, key_), TimedX(t_, x_)
         
@@ -297,15 +296,29 @@ class NeuralOC:
         t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
         x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
 
-        grad_fn = jax.value_and_grad(loss_fn, argnums=1, has_aux=True)
-        (loss, info), grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, source, target)
-        state = state.apply_gradients(grads=grads)
+        # grad_fn = jax.value_and_grad(loss_fn, argnums=1, has_aux=True)
+        # (loss, info), grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, source, target)
+        # state = state.apply_gradients(grads=grads)
+        grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
+        loss, control_grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state)
+
+        grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
+        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
+
+        g_norm_control = optax.global_norm(control_grads)
+        g_norm_potential = optax.global_norm(potential_grads)
+        scale = g_norm_potential / g_norm_control
+        state = state.apply_gradients(grads=jax.tree.map(
+          lambda gc, gp: gc * self.control_weight * scale + gp,
+          control_grads,
+          potential_grads
+        ))
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
         target_state = target_state.replace(params=new_target_params)
         
-        return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
-        # return state, loss, loss_potential, x_seq, target_state
+        # return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
+        return state, loss, loss_potential, x_seq, target_state
 
       @with_mesh
       @jax.jit
@@ -313,16 +326,30 @@ class NeuralOC:
         source = jax.lax.with_sharding_constraint(source, P('data'))
         target = jax.lax.with_sharding_constraint(target, P('data'))
 
-        grad_fn = jax.value_and_grad(loss_with_potential_fn, argnums=1, has_aux=True)
-        (loss, info), grads = grad_fn(state, state.params, key, target_state, source, target)
-        state = state.apply_gradients(grads=grads)
+        grad_fn = jax.value_and_grad(am_loss, argnums=1, has_aux=False)
+        loss, control_grads = grad_fn(state, state.params, key, source, target, target_state)
+        
+        grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
+        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
+
+        # grad_fn = jax.value_and_grad(loss_with_potential_fn, argnums=1, has_aux=True)
+        # (loss, info), grads = grad_fn(state, state.params, key, target_state, source, target)
+        # state = state.apply_gradients(grads=grads)
+
+        g_norm_control = optax.global_norm(control_grads)
+        g_norm_potential = optax.global_norm(potential_grads)
+        scale = g_norm_potential / g_norm_control
+        state = state.apply_gradients(grads=jax.tree.map(
+          lambda gc, gp: gc * self.control_weight * scale + gp,
+          control_grads,
+          potential_grads
+        ))
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
         target_state = target_state.replace(params=new_target_params)
         
-        return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
-        # return state, loss, loss_potential, x_seq, target_state
-      
+        # return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
+        return state, loss, loss_potential, x_seq, target_state
       
       return train_step_cost, train_step_with_potential
   
@@ -408,23 +435,30 @@ class NeuralOC:
     @jax.jit
     def inference(state, x_0):
 
+      the_ones = jnp.ones([x.shape[0],1])
+      x_0 = jax.lax.with_sharding_constraint(x_0, P('data'))
+      the_ones = jax.lax.with_sharding_constraint(the_ones, P('data'))
+
       dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
       
       def move(carry, _):
         t_, x_, cost, key_ = carry
-        u = dsdx_fn(state.params, t_ * jnp.ones([x.shape[0],1]), x_, x_0)
+
+        u = dsdx_fn(state.params, t_ * the_ones, x_, x_0)
         U_t = self.flow.compute_potential(t_, x_)
         sigma = self.flow.compute_sigma_t(t_)
         key_, key_s = jax.random.split(key_)
-        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * dt
+        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**2
         t_ = t_ + dt
         cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt * self.potential_weight
         return (t_, x_, cost, key_), x_
-          
+
       (_, _, cost, _), result = jax.lax.scan(move, (t_0, x_0, 0.0, loop_key), None, length=n)
       return cost, result
     
     cost, result = inference(self.state, x)
+    result = jax.lax.stop_gradient(result)
+
     x_seq = [TimedX(t=t_0, x=x)]
 
     for i in range(n):

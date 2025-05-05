@@ -16,6 +16,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+import functools
 import json
 from abc import abstractmethod
 from argparse import ArgumentParser
@@ -131,11 +132,12 @@ class MyImageFolder(ImageFolder):
 # Network
 
 class ResNetDwTime(nn.Module):
-    size: int = 64
-    nlayers: int = CONFIG.get("n_layers", 4)
+    size: int = 64 
+    nlayers: int = 4
     nc: int = 3
     nfilter: int = 64
-    nfilter_max: int = CONFIG.get("nfilter_max", 4)
+    nfilter_max: int = 512
+    t_embedding_dim: int = 128
 
     @nn.compact
     def __call__(self, t, x, train=True):
@@ -171,11 +173,19 @@ eval_every = CONFIG["eval_every"]
 
 # data preparation
 img_size, nc = 64, 3
+test_ratio = 0.1
 
 ## anime dataset
 path = "/home/jovyan/nazar/aligned_anime_faces"
 transform = Compose([Resize((img_size, img_size)), ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 anime_dataset = MyImageFolder(path, transform=transform)
+
+idx = list(range(len(anime_dataset)))
+test_size = int(len(idx) * test_ratio)
+train_idx, test_idx = idx[:-test_size], idx[-test_size:]
+
+train_anime_dataset = Subset(anime_dataset, train_idx)
+test_anime_dataset = Subset(anime_dataset, test_idx)
 
 ## celeba female dataset
 path = "/home/jovyan/nazar/celeba_female"
@@ -188,35 +198,87 @@ with open(attrs_path, 'r') as f:
 idx = [i for i in list(range(len(lines))) if lines[i].replace('  ', ' ').split(' ')[21] == '-1']
 print("celeba", len(idx), len(lines), len(celeba_female_dataset))
 
+test_size = int(len(idx) * test_ratio)
+train_idx, test_idx = idx[:-test_size], idx[-test_size:]
+
+train_celeba_female_dataset = Subset(celeba_female_dataset, train_idx)
+test_celeba_female_dataset = Subset(celeba_female_dataset, test_idx)
+
 celeba_female_dataset = Subset(celeba_female_dataset, idx)
 
 ## loader
-ot_loader = OTLoader(
-    src_ds=celeba_female_dataset,
-    trg_ds=anime_dataset,
+train_ot_loader = OTLoader(
+    src_ds=train_celeba_female_dataset,
+    trg_ds=train_anime_dataset,
     flatten_flag=True,
     shuffle=True,
     batch_size=batch_size,
     num_workers=4,
     drop_last=True,
 )
-ot_loader = iter(ot_loader)
+train_ot_loader = iter(train_ot_loader)
 
-potential_data_loader = iter(ot_loader)
+potential_data_loader = iter(train_ot_loader)
 potential = LagrangianPotentialFree()
 
 # evaluation function
+import tools.jax_inception as inception
+from tools.fid import (
+    calculate_frechet_distance,
+    get_loader_stats,
+    get_pushed_loader_stats,
+)
+
+inception_net = inception.InceptionV3(pretrained=True)
+rng = jax.random.PRNGKey(0)
+inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3)))
+inception_apply = jax.jit(functools.partial(inception_net.apply, train=False))
+
+mu_path = "experiments/mu_data.npy"
+sigma_path = "experiments/sigma_data.npy"
+if not os.path.exists(mu_path) or not os.path.exists(sigma_path):
+    test_anime_loader = DataLoader(
+        test_anime_dataset,
+        shuffle=False,
+        batch_size=batch_size,
+        num_workers=4,
+    )
+    mu_data, sigma_data = get_loader_stats(test_anime_loader, inception_apply, inception_params, batch_size=128, n_epochs=1, verbose=True, classes=False)
+    with open(mu_path, "wb") as file:
+        np.save(file, mu_data)
+    with open(sigma_path, "wb") as file:
+        np.save(file, sigma_data)
+else:
+    with open(mu_path, "rb") as file:
+        mu_data = np.load(file)
+    with open(sigma_path, "rb") as file:
+        sigma_data = np.load(file)
+test_celeba_female_loader = DataLoader(
+    test_celeba_female_dataset,
+    shuffle=False,
+    batch_size=batch_size,
+    num_workers=4,
+)
+
 def callback(step, training_logs, transport):
-    # sample batch
+    # # Compute FID
+    # mu, sigma = get_pushed_loader_stats(
+    #     transport, test_celeba_female_loader, inception_apply, inception_params, batch_size=64, verbose=True, upgrade=False
+    # )
+    # fid = calculate_frechet_distance(mu_data, sigma_data, mu, sigma)
+    # print(fid)
+
+    # Visualization
+    ## sample batch
     pi0 = next(potential_data_loader)['src_lin']
     pi1 = next(potential_data_loader)['tgt_lin']
 
-    # generate batch
+    ## generate batch
     cost, trajs = transport(pi0)
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-    # plot samples
+    ## plot samples
     def to_range(image):
         image -= image.min()
         return jnp.clip(image / image.max(), 0., 1.)
@@ -240,7 +302,10 @@ num_iterations = n_iters
 noc = NeuralOC(
     input_dim=nc*img_size**2,
     value_model=net,
-    optimizer=optax.adam(**CONFIG["optimizer"]),
+    optimizer=optax.chain(
+        optax.clip(max_delta=1.),
+        optax.adam(**CONFIG["optimizer"]),
+    ),
     control_steps=30,
     reg_weight=CONFIG["reg_weight"],
     control_weight=CONFIG["control_weight"],
@@ -251,7 +316,6 @@ noc = NeuralOC(
     batch_size=batch_size,
     load_dir=SAVE_MODEL_DIR if args.load_model else None,
 )
-# noc.load(SAVE_MODEL_DIR)
 
 logs = noc(
     potential_data_loader,
