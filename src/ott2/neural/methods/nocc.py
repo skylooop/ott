@@ -137,6 +137,7 @@ class NeuralOC:
     self.reg_weight = reg_weight
     self.acc_weight = acc_weight
     self.control_steps = control_steps
+    self.scale_ema = 1.
 
     with mesh:
       key, init_key = jax.random.split(key, 2)
@@ -220,17 +221,18 @@ class NeuralOC:
             norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
             return jax.jacfwd(norm_rev, argnums=0)(t, x).squeeze()
         
-        a = acceleration(params, t, x_t, x_t)
-        a_tgt = acceleration(target_state.params, t, x_t, x_t)
+        # a = acceleration(params, t, x_t, x_t) # TODO
+        # a_tgt = acceleration(target_state.params, t, x_t, x_t)
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
-            fun = lambda __x: state.apply_fn(p,t,__x,x0).sum()
+            fun = lambda __x: state.apply_fn(p,t[None],__x[None],x0[None]).sum()
             return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
         
         # vddx_target = laplacian(target_state.params, t, x_t, x_t).reshape(-1, 1)
         vddx = laplacian(params, t, x_t, x_t).reshape(-1, 1)
-        a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).sum(-1, keepdims=True)) * self.acc_weight
+        # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).sum(-1, keepdims=True)) * self.acc_weight # TODO
+        a_cost_tgt = 0.
         # a_cost = jnp.sqrt((a * a).sum(-1, keepdims=True)) * self.acc_weight
         potential_cost = self.potential_weight * U_t.reshape(-1, 1)
 
@@ -290,7 +292,7 @@ class NeuralOC:
 
       @with_mesh
       @jax.jit
-      def train_step_cost(state, key, source, target, t_sample, x_sample, target_state):
+      def train_step_cost(state, key, source, target, t_sample, x_sample, target_state, scale_ema):
         source = jax.lax.with_sharding_constraint(source, P('data'))
         target = jax.lax.with_sharding_constraint(target, P('data'))
         t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
@@ -307,9 +309,10 @@ class NeuralOC:
 
         g_norm_control = optax.global_norm(control_grads)
         g_norm_potential = optax.global_norm(potential_grads)
-        scale = g_norm_potential / g_norm_control
+        scale_online = g_norm_potential / g_norm_control
+        scale_ema = scale_ema * 0.9 + scale_online * 0.1
         state = state.apply_gradients(grads=jax.tree.map(
-          lambda gc, gp: gc * self.control_weight * scale + gp,
+          lambda gc, gp: gc * self.control_weight * scale_ema + gp,
           control_grads,
           potential_grads
         ))
@@ -318,17 +321,17 @@ class NeuralOC:
         target_state = target_state.replace(params=new_target_params)
         
         # return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
-        return state, loss, loss_potential, x_seq, target_state
+        return state, loss, loss_potential, x_seq, target_state, scale_ema
 
       @with_mesh
       @jax.jit
-      def train_step_with_potential(state, key, source, target, target_state):
+      def train_step_with_potential(state, key, source, target, target_state, scale_ema):
         source = jax.lax.with_sharding_constraint(source, P('data'))
         target = jax.lax.with_sharding_constraint(target, P('data'))
 
         grad_fn = jax.value_and_grad(am_loss, argnums=1, has_aux=False)
         loss, control_grads = grad_fn(state, state.params, key, source, target, target_state)
-        
+
         grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
         (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
 
@@ -338,9 +341,10 @@ class NeuralOC:
 
         g_norm_control = optax.global_norm(control_grads)
         g_norm_potential = optax.global_norm(potential_grads)
-        scale = g_norm_potential / g_norm_control
+        scale_online = g_norm_potential / g_norm_control
+        scale_ema = scale_ema * 0.9 + scale_online * 0.1
         state = state.apply_gradients(grads=jax.tree.map(
-          lambda gc, gp: gc * self.control_weight * scale + gp,
+          lambda gc, gp: gc * self.control_weight * scale_ema + gp,
           control_grads,
           potential_grads
         ))
@@ -349,7 +353,7 @@ class NeuralOC:
         target_state = target_state.replace(params=new_target_params)
         
         # return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
-        return state, loss, loss_potential, x_seq, target_state
+        return state, loss, loss_potential, x_seq, target_state, scale_ema
       
       return train_step_cost, train_step_with_potential
   
@@ -381,9 +385,9 @@ class NeuralOC:
       if it > collect_buffer_iters and it % update_potential_every != 0:
           _sample = self.buffer.sample()
           x_sample, t_sample = _sample["x"], _sample["t"]
-          self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state)
+          self.state, loss, loss_potential, tx_seq, self.target_state, self.scale_ema = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state, self.scale_ema)
       else:
-          self.state, loss, loss_potential, tx_seq, self.target_state = self.train_step_with_potential(self.state, it_key, src, tgt, self.target_state)
+          self.state, loss, loss_potential, tx_seq, self.target_state, self.scale_ema = self.train_step_with_potential(self.state, it_key, src, tgt, self.target_state, self.scale_ema)
 
       training_logs["potential_loss"].append(loss_potential.item())
       training_logs["cost_loss"].append(loss.item())
