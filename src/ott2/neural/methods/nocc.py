@@ -53,6 +53,7 @@ class NeuralOC:
       control_weight: float,
       reg_weight: float,
       acc_weight: float,
+      pretrain_steps: float = 5_000,
       time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
       key:Optional[jax.Array] = None,
       **kwargs: Any,
@@ -64,7 +65,7 @@ class NeuralOC:
     self.control_weight = control_weight
     self.reg_weight = reg_weight
     self.acc_weight = acc_weight
-    self.pretrain_steps = 5_000
+    self.pretrain_steps = pretrain_steps
    
     key, init_key = jax.random.split(key, 2)
     params = value_model.init(
@@ -158,7 +159,7 @@ class NeuralOC:
             return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
         
         def normalize(x):
-          norm = jnp.linalg.norm(x) + 1e-6
+          norm = jnp.linalg.norm(x) + 1e-8
           return x / norm
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
@@ -166,13 +167,14 @@ class NeuralOC:
             fun = lambda __t, __x: state.apply_fn(p,__t,__x,x0).sum()
             dsdx_fn = jax.grad(fun, argnums=1)
             norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
-            acc = jax.jacfwd(norm_rev, argnums=0)(t, x).squeeze() - jax.jacfwd(norm_rev, argnums=1)(t, x) @ dsdx_fn(t, x)
+            Dt, Dx = jax.jacfwd(norm_rev, argnums=[0, 1])(t, x)
+            acc = Dt.squeeze() - Dx @ dsdx_fn(t, x)
             return acc
         
         a = acceleration(params, t, x_t, x_t)
         # a_tgt = acceleration(target_state.params, t, x_t, x_t)
         # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True)) * self.acc_weight
-        a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-6) * self.acc_weight
+        a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-8) * self.acc_weight
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
         s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
@@ -227,7 +229,7 @@ class NeuralOC:
         g_norm_potential = optax.global_norm(potential_grads)
         # scale = jnp.clip(g_norm_potential / g_norm_control, min=0.01, max=10)
         scale_update = g_norm_potential / g_norm_control
-        scale = scale_update * 0.3 + scale * 0.7
+        scale = scale_update * 0.1 + scale * 0.9
 
         state = state.apply_gradients(
           grads=jax.tree.map(lambda gc, gp: gc * scale * self.control_weight + gp, control_grads, potential_grads)

@@ -87,6 +87,7 @@ class SlitPotential(LagrangianPotentialBase):
     ymin: float = -0.25
     ymax: float = 0.25
     M_bounds = (0., 1.)
+    temp_bounds = (1e-1, 2e-3)
 
     x_axes_bounds = (-1.5, 1.5)
     y_axes_bounds = (-2., 2.)
@@ -185,7 +186,7 @@ class GSB_GMM_Potential(LagrangianPotentialBase):
         V = 0.
         for i in range(self.centers.shape[0]):
             dist = jnp.linalg.norm(x - self.centers[i])
-            V -= nn.softplus(100 * (self.radius - dist))
+            V -= nn.softplus(100 * (self.radius - dist)) * (self.radius > dist).astype(jnp.int32)
 
         return V
 

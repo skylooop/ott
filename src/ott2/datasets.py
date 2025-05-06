@@ -59,8 +59,8 @@ class GaussianMixture:
   name: Name_t
   batch_size: int
   rng: jax.Array
-  scale: float = 5.0
-  std: float = 0.5
+  scale: float = 1.0
+  std: float = 1.0
 
   def __post_init__(self) -> None:
     gaussian_centers = {
