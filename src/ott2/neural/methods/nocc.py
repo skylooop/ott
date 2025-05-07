@@ -230,6 +230,7 @@ class NeuralOC:
             return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
         
         # vddx_target = laplacian(target_state.params, t, x_t, x_t).reshape(-1, 1)
+        _vddx = laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
         vddx = laplacian(params, t, x_t, x_t).reshape(-1, 1)
         # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).sum(-1, keepdims=True)) * self.acc_weight # TODO
         a_cost_tgt = 0.
@@ -237,7 +238,7 @@ class NeuralOC:
         potential_cost = self.potential_weight * U_t.reshape(-1, 1)
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
-        s_diff_1 = dsdt - 0.5 * (u * u).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
+        s_diff_1 = dsdt - 0.5 * (u * u).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * _vddx
         s_diff_2 = vt - 0.5 * (dsdx * dsdx).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
         loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean() 
 
@@ -265,10 +266,14 @@ class NeuralOC:
         (_, x_last ,_), result = jax.lax.scan(move, (t_0, x_0, key), None, length=steps_count)
         x_1_pred = jax.lax.stop_gradient(x_last)
 
-        dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0)).mean()
-        reg_loss = 0
+        # dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
+        # dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
 
-        return (reg_loss + dual_loss)  * weight, result
+        gt_vals = state.apply_fn(params, t_1, x_1, x_0 * 0)
+        fake_vals = state.apply_fn(params, t_1, x_1_pred, x_0 * 0)
+        dual_loss = -(-gt_vals + fake_vals).mean()
+        
+        return dual_loss * weight, result
 
       def loss_fn(state, params, key, t_sample, x_sample, target_state, source, target):
         control_loss_value = am_loss_sample(state, params, key, t_sample, x_sample, target_state)
@@ -392,8 +397,8 @@ class NeuralOC:
       training_logs["potential_loss"].append(loss_potential.item())
       training_logs["cost_loss"].append(loss.item())
 
-      x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
-      t_seq = tx_seq.t.reshape(-1)
+      x_seq = tx_seq.x[:, :32].reshape(-1, tx_seq.x.shape[-1])
+      t_seq = tx_seq.t[:, :32].reshape(-1)
       self.buffer.append(x=x_seq, t=t_seq)
 
       if it % eval_every == 0 and it > 0 and callback is not None:
