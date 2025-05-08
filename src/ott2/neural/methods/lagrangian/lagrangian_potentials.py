@@ -51,6 +51,7 @@ class BoxPotential(LagrangianPotentialBase):
     xmax: float = 0.5
     ymin: float = -0.5
     ymax: float = 0.5
+    temp_bounds = (1e-1, 2e-3)
     sampler_func = functools.partial(create_lagrangian_ds, geometry_str='box', key=None)
 
     def get_boundaries(self):
@@ -110,18 +111,19 @@ class SlitPotential(LagrangianPotentialBase):
         return U
 
 class BabyMazePotential(LagrangianPotentialBase):
-    xmin1: float = -0.6
+    xmin1: float = -0.5
     xmax1: float = -0.3
     ymin1: float = -1.99
     ymax1: float = -0.15
     xmin2: float = 0.3
-    xmax2: float = 0.6
+    xmax2: float = 0.5
     ymin2: float = 0.15
     ymax2: float = 1.99
     M_bounds = (0., 10.)
+    temp_bounds = (1e-1, 2e-3)
 
-    x_axes_bounds = (-2.5, 2.5)
-    y_axes_bounds = (-2.5, 2.5)
+    x_axes_bounds = (-1.5, 1.5)
+    y_axes_bounds = (-1.5, 1.5)
     sampler_func = functools.partial(create_lagrangian_ds, geometry_str='babymaze')
 
     def get_samples(self, size, key):

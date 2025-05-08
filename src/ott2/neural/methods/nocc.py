@@ -92,6 +92,7 @@ class NeuralOC:
     self.buffer_size = 0 
 
     self.train_step_fast, self.train_step_cost = self._get_step_fn()
+    self.inference = self.get_inference()
 
 
   def reset(
@@ -124,6 +125,7 @@ class NeuralOC:
     )
 
     self.train_step_fast, self.train_step_cost = self._get_step_fn()
+    self.inference = self.get_inference()
 
 
   def _get_step_fn(self) -> Callable:
@@ -149,9 +151,10 @@ class NeuralOC:
         u = dsdx_tgt
         vt = dsdt_tgt
 
-        dt = 1.0 / 60
+        dt = 1.0 / 100
         x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt
-        U_t = 0.5 * self.flow.compute_potential(t, x_t) + 0.5 * self.flow.compute_potential(t+dt, x_dt)
+        x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2
+        U_t = 0.4 * self.flow.compute_potential(t, x_t) + 0.3 * self.flow.compute_potential(t+dt, x_dt) + 0.3 * self.flow.compute_potential(t+dt*2, x_2dt)
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
@@ -202,7 +205,7 @@ class NeuralOC:
 
           # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
           # x_pred = x_ - dt * dsdx + sigma * noise
-          # Corrector step (Heun's method)
+          # # Corrector step (Heun's method)
           # u_corr = dsdx_fn(state.params, t_ + dt, x_pred, x_0)
           # x_next = x_ - dt * 0.5 * (dsdx + u_corr) + sigma * noise  # Same noise for both steps
           # t_next = t_ + dt
@@ -335,6 +338,42 @@ class NeuralOC:
         break
 
     return training_logs
+  
+  def get_inference(self):
+
+    dt = 1.0 / 30
+    t_0 = 0.0
+    n = 30
+  
+    @jax.jit
+    def inference(state, x_0, loop_key):
+
+      dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
+      
+      def move(carry, _):
+        t_, x_, cost, key_ = carry
+        u = dsdx_fn(state.params, t_ * jnp.ones([x_0.shape[0],1]), x_, x_0)
+        # At_T = self.flow.compute_inverse_control_matrix(t_, x_).transpose()
+        U_t = self.flow.compute_potential(t_, x_)
+        sigma = self.flow.compute_sigma_t(t_)
+        key_, key_s = jax.random.split(key_)
+        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+        t_ = t_ + dt
+        # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+        # x_pred = x_ - dt * u + sigma * noise
+        # # Corrector step (Heun's method)
+        # u_corr = dsdx_fn(state.params, (t_ + dt) * jnp.ones([x.shape[0],1]), x_pred, x_0)
+        # x_ = x_ - dt * 0.5 * (u + u_corr) + sigma * noise  # Same noise for both steps
+        # t_ = t_ + dt
+
+        cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt 
+        return (t_, x_, cost, key_), x_
+          
+      (_, _, cost, _), result = jax.lax.scan(move, (t_0, x_0, 0.0, loop_key), None, length=n)
+
+      return cost, result
+    
+    return inference
 
   def transport(
       self,
@@ -343,38 +382,12 @@ class NeuralOC:
       **kwargs: Any,
   ) -> jnp.ndarray:
     
-    dt = 1.0 / 30
+    loop_key = jax.random.PRNGKey(0)
     t_0 = 0.0
     n = 30
-    loop_key = jax.random.PRNGKey(0)
+    dt = 1.0 / 30
   
-    @jax.jit
-    def inference(state, x_0):
-
-      dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
-      
-      def move(carry, _):
-        t_, x_, cost, key_ = carry
-        u = dsdx_fn(state.params, t_ * jnp.ones([x.shape[0],1]), x_, x_0)
-        # At_T = self.flow.compute_inverse_control_matrix(t_, x_).transpose()
-        U_t = self.flow.compute_potential(t_, x_)
-        sigma = self.flow.compute_sigma_t(t_)
-        key_, key_s = jax.random.split(key_)
-        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
-        # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
-        # x_pred = x_ - dt * u + sigma * noise
-        # # Corrector step (Heun's method)
-        # u_corr = dsdx_fn(state.params, (t_ + dt) * jnp.ones([x.shape[0],1]), x_pred, x_0)
-        # x_ = x_ - dt * 0.5 * (u + u_corr) + sigma * noise  # Same noise for both steps
-        t_ = t_ + dt
-
-        cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt 
-        return (t_, x_, cost, key_), x_
-          
-      (_, _, cost, _), result = jax.lax.scan(move, (t_0, x_0, 0.0, loop_key), None, length=n)
-      return cost, result
-    
-    cost, result = inference(self.state, x)
+    cost, result = self.inference(self.state, x, loop_key)
     x_seq = [TimedX(t=t_0, x=x)]
 
     for i in range(n):
