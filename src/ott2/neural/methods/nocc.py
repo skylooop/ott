@@ -185,64 +185,57 @@ class NeuralOC:
           print("buffer_state: loaded")
 
 
-    self.train_step_cost, self.train_step_with_potential = self._get_step_fn()
+    self.train_step_fast, self.train_step_cost = self._get_step_fn()
 
   def _get_step_fn(self) -> Callable:
       
-      def am_loss(state, params, key_t, source, target, target_state):
-        bs = source.shape[0]
-        t = self.time_sampler(key_t, bs)
-        x_0, x_1 = source, target
-        x_t = self.flow.compute_xt(key_t, t, x_0, x_1)
-        
-        return am_loss_sample(state, params, key_t, t, x_t, target_state)
-      
-      def am_loss_sample(state, params, key_t, t_sample, x_sample, target_state):
+      def am_loss_sample(state, params, key_t, t_sample, x_sample, target_state, reg_weight):
         
         x_t = x_sample
         t = t_sample.reshape(-1, 1)
-        U_t = self.flow.compute_potential(t, x_t)
+        At_T = self.flow.compute_inverse_control_matrix(t, x_t).transpose()
 
         dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
-        # dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
-        
+
         dsdt, dsdx = dsdtdx_fn(params, t, x_t, x_t)
         dsdt_tgt, dsdx_tgt = dsdtdx_fn(target_state.params, t, x_t, x_t)
         u = dsdx_tgt
         vt = dsdt_tgt
 
-        def normalize(x):
-          norm = jnp.linalg.norm(x) + 1e-5
-          return x / norm
 
-        @partial(jax.vmap, in_axes=(None, 0, 0, 0))
-        def acceleration(p, t, x, x0):
-            fun = lambda __t, __x: state.apply_fn(p,__t,__x,x0).sum()
-            norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
-            return jax.jacfwd(norm_rev, argnums=0)(t, x).squeeze()
-        
-        # a = acceleration(params, t, x_t, x_t) # TODO
-        # a_tgt = acceleration(target_state.params, t, x_t, x_t)
+        dt = 1.0 / 100
+        x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt
+        x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2
+        U_t = 0.4 * self.flow.compute_potential(t, x_t) + 0.3 * self.flow.compute_potential(t+dt, x_dt) + 0.3 * self.flow.compute_potential(t+dt*2, x_2dt)
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
             fun = lambda __x: state.apply_fn(p,t[None],__x[None],x0[None]).sum()
             return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
         
-        # vddx_target = laplacian(target_state.params, t, x_t, x_t).reshape(-1, 1)
-        _vddx = laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
-        vddx = laplacian(params, t, x_t, x_t).reshape(-1, 1)
-        # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).sum(-1, keepdims=True)) * self.acc_weight # TODO
-        a_cost_tgt = 0.
-        # a_cost = jnp.sqrt((a * a).sum(-1, keepdims=True)) * self.acc_weight
-        potential_cost = self.potential_weight * U_t.reshape(-1, 1)
+        def normalize(x):
+          norm = jnp.linalg.norm(x) + 1e-8
+          return x / norm
+
+        @partial(jax.vmap, in_axes=(None, 0, 0, 0))
+        def acceleration(p, t, x, x0):
+            fun = lambda __t, __x: state.apply_fn(p,__t[None],__x[None],x0[None]).sum()
+            dsdx_fn = jax.grad(fun, argnums=1)
+            norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
+            Dt, Dx = jax.jacfwd(norm_rev, argnums=[0, 1])(t, x)
+            acc = Dt.squeeze() - Dx @ dsdx_fn(t, x)
+            return acc
+        
+        a = acceleration(params, t, x_t, x_t)
+        # a_tgt = acceleration(target_state.params, t, x_t, x_t)
+        # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True)) * self.acc_weight
+        a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-8) * self.acc_weight
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
-        s_diff_1 = dsdt - 0.5 * (u * u).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * _vddx
-        s_diff_2 = vt - 0.5 * (dsdx * dsdx).sum(-1, keepdims=True) + a_cost_tgt + potential_cost + D * vddx
-        loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean() 
-
-        loss += (- dsdt + 0.5 * (dsdx * dsdx).sum(-1, keepdims=True)).mean() * self.reg_weight
+        s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
+        s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
+        loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
+        # loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt).mean() * reg_weight
 
         return loss
 
@@ -252,115 +245,83 @@ class NeuralOC:
         x_0, x_1 = source, target
         dt = 1.0 / steps_count
 
-        dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
+        dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
 
         def move(carry, _):
           t_, x_, key_ = carry
-          _, dsdx = dsdtdx_fn(state.params, t_, x_, x_0)
+          dsdx = dsdx_fn(state.params, t_, x_, x_0)
           sigma = self.flow.compute_sigma_t(t_)
           key_, key_s = jax.random.split(key_)
-          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**0.5
+          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
           t_next = t_ + dt
+
+          # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+          # x_pred = x_ - dt * dsdx + sigma * noise
+          # Corrector step (Heun's method)
+          # u_corr = dsdx_fn(state.params, t_ + dt, x_pred, x_0)
+          # x_next = x_ - dt * 0.5 * (dsdx + u_corr) + sigma * noise  # Same noise for both steps
+          # t_next = t_ + dt
+
           return (t_next, x_next, key_), TimedX(t_, x_)
         
         (_, x_last ,_), result = jax.lax.scan(move, (t_0, x_0, key), None, length=steps_count)
         x_1_pred = jax.lax.stop_gradient(x_last)
 
-        # dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
-        # dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
-
-        gt_vals = state.apply_fn(params, t_1, x_1, x_0 * 0)
-        fake_vals = state.apply_fn(params, t_1, x_1_pred, x_0 * 0)
-        dual_loss = -(-gt_vals + fake_vals).mean()
+        dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
+        # dual_loss = dual_loss.mean()
+        dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
         
         return dual_loss * weight, result
 
-      def loss_fn(state, params, key, t_sample, x_sample, target_state, source, target):
-        control_loss_value = am_loss_sample(state, params, key, t_sample, x_sample, target_state)
-        potential_loss_value, x_seq = potential_loss(state, params, key, self.control_steps, 1.0, source, target)
-        loss_value = control_loss_value + potential_loss_value
-        return loss_value, {
-          "control_loss_value": control_loss_value,
-          "potential_loss_value": potential_loss_value,
-          "x_seq": x_seq,
-        }
-
-      def loss_with_potential_fn(state, params, key, target_state, source, target):
-        control_loss_value = am_loss(state, params, key, source, target, target_state)
-        potential_loss_value, x_seq = potential_loss(state, params, key, self.control_steps, 1.0, source, target)
-        loss_value = control_loss_value + potential_loss_value
-        return loss_value, {
-          "control_loss_value": control_loss_value,
-          "potential_loss_value": potential_loss_value,
-          "x_seq": x_seq,
-        }
-
       @with_mesh
       @jax.jit
-      def train_step_cost(state, key, source, target, t_sample, x_sample, target_state, scale_ema):
+      def train_step_cost(state, key, source, target, t_sample, x_sample, target_state, reg_weight, scale_ema):
         source = jax.lax.with_sharding_constraint(source, P('data'))
         target = jax.lax.with_sharding_constraint(target, P('data'))
         t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
         x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
 
-        # grad_fn = jax.value_and_grad(loss_fn, argnums=1, has_aux=True)
-        # (loss, info), grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, source, target)
-        # state = state.apply_gradients(grads=grads)
         grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
-        loss, control_grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state)
+        loss, control_grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, reg_weight)
 
         grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
         (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
 
         g_norm_control = optax.global_norm(control_grads)
         g_norm_potential = optax.global_norm(potential_grads)
-        scale_online = g_norm_potential / g_norm_control
-        scale_ema = scale_ema * 0.9 + scale_online * 0.1
-        state = state.apply_gradients(grads=jax.tree.map(
-          lambda gc, gp: gc * self.control_weight * scale_ema + gp,
-          control_grads,
-          potential_grads
-        ))
+        scale_update = g_norm_potential / g_norm_control
+        scale_ema = scale_update * 0.1 + scale_ema * 0.9
+
+        state = state.apply_gradients(
+          grads=jax.tree.map(lambda gc, gp: gc * scale_ema * self.control_weight + gp, control_grads, potential_grads)
+        )
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
         target_state = target_state.replace(params=new_target_params)
-        
-        # return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
-        return state, loss, loss_potential, x_seq, target_state, scale_ema
+
+        return state, loss, loss_potential, x_seq, target_state, g_norm_control, g_norm_potential, scale_ema
 
       @with_mesh
       @jax.jit
-      def train_step_with_potential(state, key, source, target, target_state, scale_ema):
+      def train_step_fast(state, key, source, target, t_sample, x_sample, target_state, reg_weight, scale_ema):
         source = jax.lax.with_sharding_constraint(source, P('data'))
         target = jax.lax.with_sharding_constraint(target, P('data'))
+        t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
+        x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
 
-        grad_fn = jax.value_and_grad(am_loss, argnums=1, has_aux=False)
-        loss, control_grads = grad_fn(state, state.params, key, source, target, target_state)
+        grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
+        loss, control_grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, reg_weight)
 
-        grad_fn = jax.value_and_grad(potential_loss, argnums=1, has_aux=True)
-        (loss_potential, x_seq), potential_grads = grad_fn(state, state.params, key, self.control_steps, 1.0, source, target)
-
-        # grad_fn = jax.value_and_grad(loss_with_potential_fn, argnums=1, has_aux=True)
-        # (loss, info), grads = grad_fn(state, state.params, key, target_state, source, target)
-        # state = state.apply_gradients(grads=grads)
-
-        g_norm_control = optax.global_norm(control_grads)
-        g_norm_potential = optax.global_norm(potential_grads)
-        scale_online = g_norm_potential / g_norm_control
-        scale_ema = scale_ema * 0.9 + scale_online * 0.1
-        state = state.apply_gradients(grads=jax.tree.map(
-          lambda gc, gp: gc * self.control_weight * scale_ema + gp,
-          control_grads,
-          potential_grads
-        ))
+        state = state.apply_gradients(
+          grads=jax.tree.map(lambda gc: gc * scale_ema * self.control_weight, control_grads)
+        )
 
         new_target_params = optax.incremental_update(state.params, target_state.params, 0.01)
         target_state = target_state.replace(params=new_target_params)
-        
-        # return state, info["control_loss_value"], info["potential_loss_value"], info["x_seq"], target_state
-        return state, loss, loss_potential, x_seq, target_state, scale_ema
-      
-      return train_step_cost, train_step_with_potential
+
+        return state, loss, target_state
+
+      return train_step_fast, train_step_cost
   
 
   def __call__(  # noqa: D102
@@ -368,7 +329,7 @@ class NeuralOC:
       loader: Iterable[Dict[str, np.ndarray]],
       *,
       n_iters: int,
-      collect_buffer_iters: int = 0,
+      collect_buffer_iters: int,
       update_potential_every: int = 1,
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
@@ -387,26 +348,40 @@ class NeuralOC:
       # src_cond = batch.get("src_condition")
       it_key = jax.random.fold_in(loop_key, it)
 
-      if it > collect_buffer_iters and it % update_potential_every != 0:
+      if it <= collect_buffer_iters or it % update_potential_every != 0:
+          bs = src.shape[0]
+          t_sample = self.time_sampler(it_key, bs)
+          x_sample = self.flow.compute_xt(it_key, t_sample, src, tgt)
+          reg_weight = 0.
+      else:
           _sample = self.buffer.sample()
           x_sample, t_sample = _sample["x"], _sample["t"]
-          self.state, loss, loss_potential, tx_seq, self.target_state, self.scale_ema = self.train_step_cost(self.state, it_key, src, tgt, t_sample, x_sample, self.target_state, self.scale_ema)
+          reg_weight = self.reg_weight
+
+      if it % update_potential_every != 0:
+        self.state, loss, self.target_state = self.train_step_fast(
+          self.state, it_key, src, tgt, t_sample, x_sample, self.target_state, reg_weight, self.scale_ema,
+        )
       else:
-          self.state, loss, loss_potential, tx_seq, self.target_state, self.scale_ema = self.train_step_with_potential(self.state, it_key, src, tgt, self.target_state, self.scale_ema)
+        self.state, loss, loss_potential, tx_seq, self.target_state, g_norm, g_norm_potential, self.scale_ema = self.train_step_cost(
+          self.state, it_key, src, tgt, t_sample, x_sample, self.target_state, reg_weight, self.scale_ema,
+        )
 
-      training_logs["potential_loss"].append(loss_potential.item())
-      training_logs["cost_loss"].append(loss.item())
+        training_logs["potential_loss"].append(loss_potential.item())
+        training_logs["cost_loss"].append(loss.item())
 
-      x_seq = tx_seq.x[:, :32].reshape(-1, tx_seq.x.shape[-1])
-      t_seq = tx_seq.t[:, :32].reshape(-1)
-      self.buffer.append(x=x_seq, t=t_seq)
+        x_seq = tx_seq.x[:, :128].reshape(-1, tx_seq.x.shape[-1])
+        t_seq = tx_seq.t[:, :128].reshape(-1)
+        # x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
+        # t_seq = tx_seq.t.reshape(-1)
+        self.buffer.append(x=x_seq, t=t_seq)
 
-      if it % eval_every == 0 and it > 0 and callback is not None:
-        callback(it, training_logs, self.transport)
-        pbar.set_postfix({"pot_loss": loss_potential,
-                          "cost_loss": loss})
-        if save_dir is not None:
-          self.save(save_dir, it=it)
+        if it % eval_every == 0 and it > 0 and callback is not None:
+          callback(it, training_logs, self.transport)
+          pbar.set_postfix({"pot_loss": loss_potential,
+                            "cost_loss": loss})
+          if save_dir is not None:
+            self.save(save_dir, it=it)
 
       it += 1
       if it >= n_iters:
