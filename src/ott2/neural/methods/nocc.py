@@ -316,8 +316,8 @@ class NeuralOC:
         training_logs["g_norm"].append(g_norm)
         training_logs["g_norm_potential"].append(g_norm_potential)
 
-        x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])[::10]
-        t_seq = tx_seq.t.reshape(-1)[::10]
+        x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])[::100]
+        t_seq = tx_seq.t.reshape(-1)[::100]
         self.x_buffer = np.roll(self.x_buffer, x_seq.shape[0], axis=0)
         self.x_buffer[:x_seq.shape[0]] = np.asarray(x_seq)
         self.t_buffer = np.roll(self.t_buffer, x_seq.shape[0], axis=0)

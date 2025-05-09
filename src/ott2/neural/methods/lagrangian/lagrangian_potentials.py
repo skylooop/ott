@@ -120,7 +120,7 @@ class BabyMazePotential(LagrangianPotentialBase):
     ymin2: float = 0.15
     ymax2: float = 1.99
     M_bounds = (0., 10.)
-    temp_bounds = (1e-1, 2e-3)
+    # temp_bounds = (1e-1, 2e-3)
 
     x_axes_bounds = (-1.5, 1.5)
     y_axes_bounds = (-1.5, 1.5)
