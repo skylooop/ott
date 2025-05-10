@@ -1,3 +1,7 @@
+# import diffrax
+import os
+from functools import partial
+
 # Copyright OTT-JAX
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,30 +16,83 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-from typing import NamedTuple, Any
+
+import flashbax as fbx
+import lineax as lx
+from tqdm import tqdm
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tqdm import tqdm
 
-# import diffrax
-from functools import partial
-from flax.training import train_state
+import diffrax
+import optax
 from flax import linen as nn
 from flax import struct
-import optax
+from flax.training import train_state
+
 from ott2 import utils
 from ott2.neural.methods.flows import dynamics
 from ott2.solvers import utils as solver_utils
-from flax.training import train_state
-import diffrax
-import lineax as lx
 
 __all__ = ["NeuralOC"]
 
 
 Callback_t = Callable[[int, ], None]
+
+# multigpu
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+NPROC = len(os.environ.get("CUDA_VISIBLE_DEVICES", "").split(","))
+
+P = PartitionSpec
+mesh = Mesh(mesh_utils.create_device_mesh((NPROC,)), axis_names=('data',))
+
+def with_mesh(f):
+    def wrapper(*args, **kwargs):
+        with mesh:
+            return f(*args, **kwargs)
+    return wrapper
+
+# buffer
+class TrajectoryBuffer:
+    def __init__(
+        self,
+        capacity: int,
+        dim: int,
+        batch_size: int,
+        seed: int=0
+    ):
+        buffer = fbx.make_item_buffer(
+            min_length=1,
+            max_length=capacity,
+            sample_batch_size=batch_size,
+            add_batches=True,
+        )
+        buffer = buffer.replace(
+            init = jax.jit(buffer.init),
+            add = jax.jit(buffer.add, donate_argnums=0),
+            sample = jax.jit(buffer.sample),
+            can_sample = jax.jit(buffer.can_sample),
+        )
+
+        init_sample = {"x": np.random.randn(dim), "t": np.random.randn()} 
+        state = buffer.init(init_sample)
+
+        self.buffer = buffer
+        self.state = state
+        self.rng = jax.random.key(seed)
+    
+    def append(self, x: np.ndarray, t: np.ndarray):
+        self.state = self.buffer.add(
+            self.state,
+            {"x": x, "t": t}
+        )
+    
+    def sample(self):
+        self.rng, key = jax.random.split(self.rng)
+        return self.buffer.sample(self.state, key).experience
 
 class TimedX(struct.PyTreeNode):
   t: jnp.ndarray
@@ -86,10 +143,6 @@ class NeuralOC:
       params=jax.tree.map(lambda x: jnp.copy(x), params),
       tx=optax.identity()
     )
-
-    self.x_buffer = np.empty([100_000, input_dim])
-    self.t_buffer = np.empty([100_000])
-    self.buffer_size = 0 
 
     self.train_step_fast, self.train_step_cost = self._get_step_fn()
     self.inference = self.get_inference()
@@ -220,8 +273,14 @@ class NeuralOC:
         
         return dual_loss * weight, result
 
+      @with_mesh
       @jax.jit
       def train_step_cost(state, key, source, target, t_sample, x_sample, target_state, reg_weight, scale):
+        source = jax.lax.with_sharding_constraint(source, P('data'))
+        target = jax.lax.with_sharding_constraint(target, P('data'))
+        t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
+        x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
+
         grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
         loss, control_grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, reg_weight)
 
@@ -244,8 +303,12 @@ class NeuralOC:
         return state, loss, loss_potential, x_seq, target_state, g_norm_control,  g_norm_potential, scale
 
 
+      @with_mesh
       @jax.jit
       def train_step_fast(state, key, source, target, t_sample, x_sample, target_state, reg_weight, scale):
+        t_sample = jax.lax.with_sharding_constraint(t_sample, P('data'))
+        x_sample = jax.lax.with_sharding_constraint(x_sample, P('data'))
+
         grad_fn = jax.value_and_grad(am_loss_sample, argnums=1, has_aux=False)
         loss, control_grads = grad_fn(state, state.params, key, t_sample, x_sample, target_state, reg_weight)
 
@@ -269,7 +332,14 @@ class NeuralOC:
       n_iters: int,
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
+      eval_every: int = 5_000,
   ) -> Dict[str, List[float]]:
+    batch_size, input_dim = next(iter(loader))["src_lin"].shape
+    self.buffer = TrajectoryBuffer(
+      capacity=100_000,
+      dim=input_dim,
+      batch_size=batch_size,
+    )
     
     loop_key = utils.default_prng_key(rng)
     training_logs = {"cost_loss": [], "potential_loss": [], "g_norm": [], "g_norm_potential" : []}
@@ -285,9 +355,8 @@ class NeuralOC:
       it_key = jax.random.fold_in(loop_key, it)
 
       if it > self.pretrain_steps:
-          ids = np.random.randint(0, self.buffer_size, src.shape[0])
-          t_sample = self.t_buffer[ids].reshape(-1, 1)
-          x_sample = self.x_buffer[ids]
+          _sample = self.buffer.sample()
+          x_sample, t_sample = _sample["x"], _sample["t"]
           reg_weight = self.reg_weight
           # if it % 4 == 0:
           #     tt = self.time_sampler(it_key, src.shape[0])
@@ -316,13 +385,10 @@ class NeuralOC:
         training_logs["g_norm"].append(g_norm)
         training_logs["g_norm_potential"].append(g_norm_potential)
 
-        x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])[::100]
-        t_seq = tx_seq.t.reshape(-1)[::100]
-        self.x_buffer = np.roll(self.x_buffer, x_seq.shape[0], axis=0)
-        self.x_buffer[:x_seq.shape[0]] = np.asarray(x_seq)
-        self.t_buffer = np.roll(self.t_buffer, x_seq.shape[0], axis=0)
-        self.t_buffer[:x_seq.shape[0]] = np.asarray(t_seq)
-        self.buffer_size = min(self.buffer_size + x_seq.shape[0], 100_000)
+        traj_idx = np.random.randint(tx_seq.x.shape[1])
+        x_seq = tx_seq.x[:, traj_idx].reshape(-1, tx_seq.x.shape[-1])
+        t_seq = tx_seq.t[:, traj_idx].reshape(-1)
+        self.buffer.append(x=x_seq, t=t_seq)
 
       if it % 100 == 0 and it > 0:
         pbar.set_postfix({"pot_loss": loss_potential,
@@ -330,7 +396,7 @@ class NeuralOC:
                           "g_norm": g_norm, 
                           "g_norm_potential": g_norm_potential})
 
-      if it % 5_000 == 0 and it > 0 and callback is not None:
+      if it % eval_every == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
       
       it += 1
