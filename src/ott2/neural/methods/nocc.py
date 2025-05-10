@@ -1,5 +1,6 @@
 # import diffrax
 import os
+import pickle
 from functools import partial
 
 # Copyright OTT-JAX
@@ -123,26 +124,27 @@ class NeuralOC:
     self.reg_weight = reg_weight
     self.acc_weight = acc_weight
     self.pretrain_steps = pretrain_steps
-   
-    key, init_key = jax.random.split(key, 2)
-    params = value_model.init(
-      init_key, 
-      jnp.ones([1, 1]), 
-      jnp.ones([1, input_dim]), 
-      jnp.ones([1, input_dim])
-    )
-  
-    self.state = train_state.TrainState.create(
-      apply_fn=value_model.apply,
-      params=params,
-      tx=optimizer
-    )
 
-    self.target_state = train_state.TrainState.create(
-      apply_fn=value_model.apply,
-      params=jax.tree.map(lambda x: jnp.copy(x), params),
-      tx=optax.identity()
-    )
+    with mesh:
+      key, init_key = jax.random.split(key, 2)
+      params = value_model.init(
+        init_key, 
+        jnp.ones([1, 1]), 
+        jnp.ones([1, input_dim]), 
+        jnp.ones([1, input_dim])
+      )
+    
+      self.state = train_state.TrainState.create(
+        apply_fn=value_model.apply,
+        params=params,
+        tx=optimizer
+      )
+
+      self.target_state = train_state.TrainState.create(
+        apply_fn=value_model.apply,
+        params=jax.tree.map(lambda x: jnp.copy(x), params),
+        tx=optax.identity()
+      )
 
     self.train_step_fast, self.train_step_cost = self._get_step_fn()
     self.inference = self.get_inference()
@@ -333,6 +335,7 @@ class NeuralOC:
       rng: Optional[jax.Array] = None,
       callback: Optional[Callback_t] = None,
       eval_every: int = 5_000,
+      save_dir: str = None,
   ) -> Dict[str, List[float]]:
     batch_size, input_dim = next(iter(loader))["src_lin"].shape
     self.buffer = TrajectoryBuffer(
@@ -398,12 +401,30 @@ class NeuralOC:
 
       if it % eval_every == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
+        if save_dir is not None:
+          self.save(save_dir, it=it)
+
       
       it += 1
       if it >= n_iters:
         break
 
     return training_logs
+
+  def save(self, save_dir: str, it: int):
+    with open(f"{save_dir}/opt_state_step_{it}.pkl", "wb") as file:
+      pickle.dump(self.state.opt_state, file)
+    with open(f"{save_dir}/params_step_{it}.pkl", "wb") as file:
+      pickle.dump(self.state.params, file)
+    with open(f"{save_dir}/opt_state_latest.pkl", "wb") as file:
+      pickle.dump(self.state.opt_state, file)
+    with open(f"{save_dir}/params_latest.pkl", "wb") as file:
+      pickle.dump(self.state.params, file)
+    with open(f"{save_dir}/step_latest.pkl", "wb") as file:
+      pickle.dump(self.state.step, file)
+    with open(f"{save_dir}/buffer_state_latest.pkl", "wb") as file:
+      pickle.dump(self.buffer.state, file)
+
   
   def get_inference(self):
 

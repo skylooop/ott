@@ -223,7 +223,7 @@ from tools.fid import (
 
 inception_net = inception.InceptionV3(pretrained=True)
 rng = jax.random.PRNGKey(0)
-inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3))) # TODO: WHY?
+inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3)))
 inception_apply = jax.jit(functools.partial(inception_net.apply, train=False))
 
 mu_path = "experiments/mu_data.npy"
@@ -246,7 +246,7 @@ else:
     with open(sigma_path, "rb") as file:
         sigma_data = np.load(file)
 
-test_batch_size = 512
+test_batch_size = 256
 test_celeba_female_loader = DataLoader(
     test_celeba_female_dataset,
     shuffle=False,
@@ -303,11 +303,11 @@ noc = NeuralOC(
         optax.adam(**CONFIG["optimizer"]),
     ),
     control_steps=30,
-    reg_weight=CONFIG["reg_weight"],
+    reg_weight=0.,
     control_weight=CONFIG["control_weight"],
     acc_weight=CONFIG["acc_weight"],
     potential_weight=0.,
-    flow=LagrangianFlow(sigma=CONFIG["interpolation_sigma"], potential=potential),
+    flow=LagrangianFlow(sigma=CONFIG["sigma"], potential=potential),
     key=GLOBAL_KEY,
     pretrain_steps=CONFIG["n_pretraining_iters"],
 )
@@ -318,7 +318,7 @@ logs = noc(
     rng=GLOBAL_KEY,
     callback=callback,
     eval_every=CONFIG["eval_every"],
-    # save_dir=SAVE_MODEL_DIR,
+    save_dir=SAVE_MODEL_DIR,
 )
 
 with open(f"{SAVE_DIR}/logs.json", 'w') as f:
