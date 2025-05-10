@@ -254,3 +254,24 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
     
   return Gaussian(source_mean=source_mean, source_var=variance,
                   target_mean=target_mean, target_var=variance, batch_size=batch_size, init_key=key)
+
+def create_sphere_ds(dim: int, sigma: float, batch_size: int, key):
+  src_base = np.zeros((batch_size, dim))
+  src_base[:, 0] = 1.
+
+  trg_base = np.zeros((batch_size, dim))
+  trg_base[:, 0] = -1.
+
+  while True:
+    key, src_key, trg_key = jax.random.split(key, 3)
+
+    src_sample = jax.random.normal(src_key, (batch_size, dim)) * sigma + src_base
+    src_sample /= np.linalg.norm(src_sample, axis=-1, keepdims=True)
+
+    trg_sample = jax.random.normal(trg_key, (batch_size, dim)) * sigma + trg_base
+    trg_sample /= np.linalg.norm(trg_sample, axis=-1, keepdims=True)
+
+    yield {
+      "src_lin": src_sample,
+      "tgt_lin": trg_sample
+    }

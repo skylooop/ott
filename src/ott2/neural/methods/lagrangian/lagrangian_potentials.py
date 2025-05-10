@@ -9,7 +9,7 @@ from jax import nn
 
 from flax.struct import PyTreeNode
 
-from ott2.datasets import create_lagrangian_ds
+from ott2.datasets import create_lagrangian_ds, create_sphere_ds
 
 
 class LagrangianPotentialBase(PyTreeNode):
@@ -321,3 +321,24 @@ class STunnel_Potential(LagrangianPotentialBase):
         V -= self.M * nn.sigmoid((self.c - d) / self.temp)
 
         return V
+
+class Sphere_Potential(PyTreeNode):
+    dim: int = 2
+    r: float = 1.
+    sigma: float = 0.01
+    x_axes_bounds = (-2*r, 2*r)
+    y_axes_bounds = (-2*r, 2*r)
+    sampler_func = functools.partial(create_sphere_ds, dim=dim, sigma=sigma)
+
+    def __call__(self, x):
+        x_norm = jnp.linalg.norm(x, axis=-1)
+        v = jax.lax.cond(
+            x_norm >= self.r,
+            lambda:  0.,
+            lambda: -1.
+        )
+        return v
+
+    def get_boundaries(self):
+        x = np.linspace(-self.r, self.r, num=200)
+        return [x] * self.dim
