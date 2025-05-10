@@ -1,0 +1,21 @@
+#
+eval_every: 10_000
+
+# train init process
+batch_size: 64
+n_training_iters: 500_000
+collect_buffer_iters: 20_000
+update_potential_every: 5
+
+# model params
+reg_weight: 0.
+control_weight: 1.
+
+# net
+n_layers: 5
+nfilter_max: 512 
+
+optimizer:
+  learning_rate: 1e-4
+  b1: 0.5
+  b2: 0.5
