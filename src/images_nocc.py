@@ -1,7 +1,7 @@
 import os
 
-CUDA_VISIBLE_DEVICES = "0,1,2,3,4,5,6,7"
-# CUDA_VISIBLE_DEVICES = "0,1,2,3"
+# CUDA_VISIBLE_DEVICES = "0,1,2,3,4,5,6,7"
+CUDA_VISIBLE_DEVICES = "0,1"
 # CUDA_VISIBLE_DEVICES = "0"
 os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
 
@@ -10,7 +10,7 @@ os.environ['JAX_PLATFORM_NAME'] = 'gpu'
 
 import sys
 
-sys.path.insert(0, "/home/jovyan/d-shlenskii/repos/skyloop/ott/src")
+sys.path.insert(0, "/home/nazar/projects/hota_images/src")
 
 import warnings
 
@@ -176,7 +176,7 @@ img_size, nc = 64, 3
 test_ratio = 0.1
 
 ## anime dataset
-path = "/home/jovyan/nazar/aligned_anime_faces"
+path = "/home/nazar/projects/aligned_anime_faces"
 transform = Compose([Resize((img_size, img_size)), ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 anime_dataset = MyImageFolder(path, transform=transform)
 
@@ -188,8 +188,8 @@ train_anime_dataset = Subset(anime_dataset, train_idx)
 test_anime_dataset = Subset(anime_dataset, test_idx)
 
 ## celeba female dataset
-path = "/home/jovyan/nazar/celeba_female"
-attrs_path = "/home/jovyan/nazar/list_attr_celeba.txt" 
+path = "/home/nazar/projects/celeba_female"
+attrs_path = "/home/nazar/projects/list_attr_celeba.txt" 
 transform = Compose([Resize((img_size, img_size)), ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 celeba_female_dataset = MyImageFolder(path, transform=transform)
 
