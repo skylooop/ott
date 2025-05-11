@@ -1,3 +1,13 @@
+<<<<<<< HEAD
+=======
+from abc import abstractmethod
+import jax.numpy as jnp
+import jax
+from jax import nn
+import numpy as np
+from ott2.datasets import create_lagrangian_ds, create_sphere_ds
+
+>>>>>>> 2e32326 (bk)
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -323,14 +333,22 @@ class STunnel_Potential(LagrangianPotentialBase):
         V -= self.M * nn.sigmoid((self.c - d) / self.temp)
 
         return V
+    
 
 class Sphere_Potential(PyTreeNode):
-    dim: int = 2
-    r: float = 1.
+    dim: int = 3
+    r: float = 0.5
     sigma: float = 0.1
     x_axes_bounds = (-2*r, 2*r)
     y_axes_bounds = (-2*r, 2*r)
     sampler_func = functools.partial(create_sphere_ds, dim=dim, sigma=sigma)
+
+    def get_samples(self, size, key):
+        box_sampler = self.sampler_func(batch_size=size, key=key)
+        sampler = next(box_sampler)
+        source_data = sampler['src_lin']
+        target_data = sampler['tgt_lin']
+        return source_data, target_data
 
     def __call__(self, x):
         x_norm = jnp.linalg.norm(x, axis=-1)
