@@ -324,8 +324,8 @@ class STunnel_Potential(LagrangianPotentialBase):
 
 class Sphere_Potential(PyTreeNode):
     dim: int = 3
-    r: float = 0.5
-    sigma: float = 0.1
+    r: float = 0.95
+    sigma: float = 0.3
     x_axes_bounds = (-2*r, 2*r)
     y_axes_bounds = (-2*r, 2*r)
     sampler_func = functools.partial(create_sphere_ds, dim=dim, sigma=sigma)

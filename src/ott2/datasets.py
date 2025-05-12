@@ -258,19 +258,21 @@ def create_lagrangian_ds(geometry_str: str, batch_size: int, key):
 
 def create_sphere_ds(dim: int, sigma: float, batch_size: int, key):
   src_base = np.zeros((batch_size, dim))
-  src_base[:, 0] = 1.
+  src_base[:, 2] = 1.
 
   trg_base = np.zeros((batch_size, dim))
-  trg_base[:, 0] = 0.0
+  trg_base[:, 2] = -1.
 
   while True:
-    key, src_key, trg_key = jax.random.split(key, 3)
+    key, src_key, trg_key, trg_key_2 = jax.random.split(key, 4)
 
     src_sample = jax.random.normal(src_key, (batch_size, dim)) * sigma + src_base
     src_sample /= np.linalg.norm(src_sample, axis=-1, keepdims=True)
 
     trg_sample = jax.random.normal(trg_key, (batch_size, dim)) * sigma + trg_base
+    # trg_sample *= np.asarray([1, 1, 0])[np.newaxis, ]
     trg_sample /= np.linalg.norm(trg_sample, axis=-1, keepdims=True)
+    # trg_sample = trg_sample + jax.random.normal(trg_key_2, (batch_size, dim)) * 0.02
 
     yield {
       "src_lin": src_sample,
