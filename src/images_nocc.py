@@ -54,6 +54,11 @@ from IPython.display import clear_output
 from ott2.neural.methods.flows.dynamics import LagrangianFlow
 from ott2.neural.methods.nocc import NeuralOC
 from ott2.neural.networks.resnet_d import ResNet_D
+import torch, gc
+gc.collect()
+torch.cuda.empty_cache()
+jax.clear_caches()
+
 
 GLOBAL_KEY = jax.random.key(42) 
 
@@ -135,9 +140,9 @@ class ResNetDwTime(nn.Module):
     size: int = 64 
     nlayers: int = 4
     nc: int = 3
-    nfilter: int = 64
+    nfilter: int = 100
     nfilter_max: int = 512
-    t_embedding_dim: int = 128
+
 
     @nn.compact
     def __call__(self, t, x, train=True):
@@ -145,14 +150,18 @@ class ResNetDwTime(nn.Module):
 
         x = x.reshape(-1, self.nc, self.size, self.size)
 
-        t_emb = nn.Dense(self.size**2)(t[:, None]) # [b, size**2]
-        t_emb = t_emb.reshape(b_size, 1, self.size, self.size)
+        t_pos = jnp.arange(1, 30) * t
+        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, 30), jnp.cos(t_pos) / jnp.arange(1, 30)], -1)
 
-        x_with_t = jnp.concatenate([x, t_emb], axis=1)
+        b = nn.Dense(self.size ** 2)(t_pos) # [b, size**2]
+        b = b.reshape(b_size, 1, self.size, self.size)
+
+        x_with_t = jnp.concatenate([x, b], axis=1)
+        
         return ResNet_D(
             size=self.size,
             nlayers=self.nlayers,
-            nc=self.nc+1,
+            nc=self.nc + 1,
             nfilter=self.nfilter,
             nfilter_max=self.nfilter_max,
         )(x_with_t)
@@ -227,6 +236,7 @@ from tools.fid import (
     calculate_frechet_distance,
     get_loader_stats,
     get_pushed_loader_stats,
+    get_pushed_loader_stats_torch,
 )
 
 inception_net = inception.InceptionV3(pretrained=True)
@@ -234,8 +244,8 @@ rng = jax.random.PRNGKey(0)
 inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3))) # TODO: WHY?
 inception_apply = jax.jit(functools.partial(inception_net.apply, train=False))
 
-mu_path = "experiments/mu_data.npy"
-sigma_path = "experiments/sigma_data.npy"
+mu_path = "/home/nazar/projects/hota_images/src/experiments/mu_data.npy"
+sigma_path = "/home/nazar/projects/hota_images/src/experiments/sigma_data.npy"
 if not os.path.exists(mu_path) or not os.path.exists(sigma_path):
     test_anime_loader = DataLoader(
         test_anime_dataset,
@@ -254,7 +264,7 @@ else:
     with open(sigma_path, "rb") as file:
         sigma_data = np.load(file)
 
-test_batch_size = 512
+test_batch_size = 256
 test_celeba_female_loader = DataLoader(
     test_celeba_female_dataset,
     shuffle=False,
@@ -264,10 +274,14 @@ test_celeba_female_loader = DataLoader(
 
 def callback(step, training_logs, transport):
     # # # Compute FID
+
     mu, sigma = get_pushed_loader_stats(
         transport, test_celeba_female_loader, inception_apply, inception_params, batch_size=test_batch_size, verbose=True, upgrade=False
     )
     fid = calculate_frechet_distance(mu_data, sigma_data, mu, sigma)
+
+    print("fid", fid)
+
     with open(f"{SAVE_DIR}/FID.txt", "a") as file:
         file.write(f"{fid}\n")
 
@@ -283,8 +297,8 @@ def callback(step, training_logs, transport):
 
     ## plot samples
     def to_range(image):
-        image -= image.min()
-        return jnp.clip(image / image.max(), 0., 1.)
+        image = image * 0.5 + 0.5
+        return jnp.clip(image, 0., 1.)
 
     axes[0].imshow(to_range(pi0[0]).reshape(nc, img_size, img_size).transpose(1, 2, 0))
     axes[0].set_title('Source')
@@ -298,6 +312,11 @@ def callback(step, training_logs, transport):
     axes[2].set_title('Target')
     axes[2].axis('off')
 
+    print("pi1", pi1[0].min(), pi1[0].mean(), pi1[0].max())
+    print("pi0", pi0[0].min(), pi0[0].mean(), pi0[0].max())
+    print("pred", trajs[-1].x[0].min(), trajs[-1].x[0].mean(), trajs[-1].x[0].max())
+    print()
+
     plt.savefig(f"{SAVE_GENS_DIR}/step_{step}.png")
 
 net = ResNetDwTime(size=img_size, nc=nc)
@@ -306,15 +325,15 @@ noc = NeuralOC(
     input_dim=nc*img_size**2,
     value_model=net,
     optimizer=optax.chain(
-        optax.clip(max_delta=1.),
+        # optax.clip(max_delta=1.),
         optax.adam(**CONFIG["optimizer"]),
     ),
     control_steps=30,
     reg_weight=CONFIG["reg_weight"],
     control_weight=CONFIG["control_weight"],
-    acc_weight=0.,
+    acc_weight=0.0,
     potential_weight=0.,
-    flow=LagrangianFlow(sigma=0.1, potential=potential),
+    flow=LagrangianFlow(sigma=0.05, potential=potential),
     key=GLOBAL_KEY,
     batch_size=batch_size,
     load_dir=SAVE_MODEL_DIR if args.load_model else None,

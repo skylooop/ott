@@ -138,6 +138,7 @@ class NeuralOC:
     self.acc_weight = acc_weight
     self.control_steps = control_steps
     self.scale_ema = 1.
+    self.cost_mult = 1.0 / 1000
 
     with mesh:
       key, init_key = jax.random.split(key, 2)
@@ -162,30 +163,31 @@ class NeuralOC:
       elif not os.path.exists(load_dir):
         print(f"Path does not exist: {load_dir}")
       else:
-        with open(f"{load_dir}/opt_state_latest.pkl", "rb") as file:
+        with open(f"{load_dir}/opt_state_step_19000.pkl", "rb") as file:
           opt_state = pickle.load(file)
-        with open(f"{load_dir}/params_latest.pkl", "rb") as file:
+        with open(f"{load_dir}/params_step_19000.pkl", "rb") as file:
           params = pickle.load(file)
-        with open(f"{load_dir}/step_latest.pkl", "rb") as file:
-          step = pickle.load(file)
+        # with open(f"{load_dir}/step_step_19000.pkl", "rb") as file:
+        step = 19000
         self.state = self.state.replace(params=params, opt_state=opt_state, step=step)
         self.target_state = self.target_state.replace(params=params, step=step)
         print("opt_state + params + step: loaded")
 
 
     self.buffer = TrajectoryBuffer(
-      capacity=100_000,
+      capacity=50_000,
       dim=input_dim,
-      batch_size=batch_size,
+      batch_size=batch_size
     )
-    if load_dir and os.path.exists(load_dir):
-        with open(f"{load_dir}/buffer_state_latest.pkl", "rb") as file:
-          buffer_state = pickle.load(file)
-          self.buffer.state = buffer_state
-          print("buffer_state: loaded")
+    # if load_dir and os.path.exists(load_dir):
+    #     with open(f"{load_dir}/buffer_state_latest.pkl", "rb") as file:
+    #       buffer_state = pickle.load(file)
+    #       self.buffer.state = buffer_state
+    #       print("buffer_state: loaded")
 
 
     self.train_step_fast, self.train_step_cost = self._get_step_fn()
+    self.inference = self.get_inference()
 
   def _get_step_fn(self) -> Callable:
       
@@ -193,7 +195,7 @@ class NeuralOC:
         
         x_t = x_sample
         t = t_sample.reshape(-1, 1)
-        At_T = self.flow.compute_inverse_control_matrix(t, x_t).transpose()
+        # At_T = self.flow.compute_inverse_control_matrix(t, x_t).transpose()
 
         dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
 
@@ -202,11 +204,10 @@ class NeuralOC:
         u = dsdx_tgt
         vt = dsdt_tgt
 
-
-        dt = 1.0 / 100
-        x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt
-        x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2
-        U_t = 0.4 * self.flow.compute_potential(t, x_t) + 0.3 * self.flow.compute_potential(t+dt, x_dt) + 0.3 * self.flow.compute_potential(t+dt*2, x_2dt)
+        # dt = 1.0 / 100
+        # x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt
+        # x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2
+        # U_t = 0.4 * self.flow.compute_potential(t, x_t) + 0.3 * self.flow.compute_potential(t+dt, x_dt) + 0.3 * self.flow.compute_potential(t+dt*2, x_2dt)
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
@@ -217,23 +218,24 @@ class NeuralOC:
           norm = jnp.linalg.norm(x) + 1e-8
           return x / norm
 
-        @partial(jax.vmap, in_axes=(None, 0, 0, 0))
-        def acceleration(p, t, x, x0):
-            fun = lambda __t, __x: state.apply_fn(p,__t[None],__x[None],x0[None]).sum()
-            dsdx_fn = jax.grad(fun, argnums=1)
-            norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
-            Dt, Dx = jax.jacfwd(norm_rev, argnums=[0, 1])(t, x)
-            acc = Dt.squeeze() - Dx @ dsdx_fn(t, x)
-            return acc
+        # @partial(jax.vmap, in_axes=(None, 0, 0, 0))
+        # def acceleration(p, t, x, x0):
+        #     fun = lambda __t, __x: state.apply_fn(p,__t[None],__x[None],x0[None]).sum()
+        #     dsdx_fn = jax.grad(fun, argnums=1)
+        #     norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
+        #     Dt, Dx = jax.jacfwd(norm_rev, argnums=[0, 1])(t, x)
+        #     acc = Dt.squeeze() - Dx @ dsdx_fn(t, x) 
+        #     return acc
         
-        a = acceleration(params, t, x_t, x_t)
+        # a = acceleration(params, t, x_t, x_t)
         # a_tgt = acceleration(target_state.params, t, x_t, x_t)
         # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True)) * self.acc_weight
-        a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-8) * self.acc_weight
+        # a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-8) * self.acc_weight
+        a_cost = 0
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
-        s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
-        s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
+        s_diff_1 = dsdt - 0.5 * (1 / self.cost_mult) * (u * u).sum(-1, keepdims=True) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
+        s_diff_2 = vt - 0.5 * (1 / self.cost_mult) * (dsdx * dsdx).sum(-1, keepdims=True) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
         loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
         # loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt).mean() * reg_weight
 
@@ -252,7 +254,7 @@ class NeuralOC:
           dsdx = dsdx_fn(state.params, t_, x_, x_0)
           sigma = self.flow.compute_sigma_t(t_)
           key_, key_s = jax.random.split(key_)
-          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+          x_next = x_ - dt * dsdx * (1 / self.cost_mult) + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
           t_next = t_ + dt
 
           # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
@@ -348,7 +350,7 @@ class NeuralOC:
       # src_cond = batch.get("src_condition")
       it_key = jax.random.fold_in(loop_key, it)
 
-      if it <= collect_buffer_iters or it % update_potential_every != 0:
+      if it <= collect_buffer_iters:
           bs = src.shape[0]
           t_sample = self.time_sampler(it_key, bs)
           x_sample = self.flow.compute_xt(it_key, t_sample, src, tgt)
@@ -370,22 +372,27 @@ class NeuralOC:
         training_logs["potential_loss"].append(loss_potential.item())
         training_logs["cost_loss"].append(loss.item())
 
-        x_seq = tx_seq.x[:, :128].reshape(-1, tx_seq.x.shape[-1])
-        t_seq = tx_seq.t[:, :128].reshape(-1)
-        # x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
-        # t_seq = tx_seq.t.reshape(-1)
-        self.buffer.append(x=x_seq, t=t_seq)
+        pbar.set_postfix({
+             "pot_loss": loss_potential,
+              "cost_loss": loss,
+              "g_norm": g_norm,
+              "g_norm_potential": g_norm_potential
+          })
 
-        if it % eval_every == 0 and it > 0 and callback is not None:
-          callback(it, training_logs, self.transport)
-          pbar.set_postfix({"pot_loss": loss_potential,
-                            "cost_loss": loss})
-          if save_dir is not None:
-            self.save(save_dir, it=it)
+        x_seq = tx_seq.x.reshape(-1, tx_seq.x.shape[-1])
+        t_seq = tx_seq.t.reshape(-1)
+        rnd_index = jax.random.randint(it_key, shape=(10), minval=0, maxval=t_seq.shape[0])
+        self.buffer.append(x=x_seq[rnd_index], t=t_seq[rnd_index])
+
+
+      if it % eval_every == 0 and callback is not None:
+        callback(it, training_logs, self.transport)
+        
+      if it % 5000 == 0 and it > 0 and save_dir is not None:
+          self.save(save_dir, it=it)
 
       it += 1
-      if it >= n_iters:
-        break
+
 
     return training_logs
 
@@ -403,13 +410,7 @@ class NeuralOC:
     with open(f"{save_dir}/buffer_state_latest.pkl", "wb") as file:
       pickle.dump(self.buffer.state, file)
 
-  def transport(
-      self,
-      x: jnp.ndarray,
-      condition: Optional[jnp.ndarray] = None,
-      **kwargs: Any,
-  ) -> jnp.ndarray:
-    
+  def get_inference(self):
     dt = 1.0 / self.control_steps
     t_0 = 0.0
     n = self.control_steps
@@ -420,7 +421,7 @@ class NeuralOC:
     def inference(state, x_0):
 
       x_0 = jax.lax.with_sharding_constraint(x_0, P('data'))
-      the_ones = jnp.ones([x.shape[0],1])
+      the_ones = jnp.ones([x_0.shape[0],1])
 
       dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
       
@@ -431,15 +432,29 @@ class NeuralOC:
         U_t = self.flow.compute_potential(t_, x_)
         sigma = self.flow.compute_sigma_t(t_)
         key_, key_s = jax.random.split(key_)
-        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**0.5
+        x_ = x_ - dt * u * (1 / self.cost_mult) + sigma * jax.random.normal(key_s, shape=x_.shape) * dt**0.5
         t_ = t_ + dt
-        cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt * self.potential_weight
+        cost += 0.5 * (1 / self.cost_mult) * (u * u).sum(-1).mean() * dt + U_t.mean() * dt * self.potential_weight
         return (t_, x_, cost, key_), x_
 
       (_, _, cost, _), result = jax.lax.scan(move, (t_0, x_0, 0.0, loop_key), None, length=n)
       return cost, result
     
-    cost, result = inference(self.state, x)
+    return inference
+  
+
+  def transport(
+      self,
+      x: jnp.ndarray,
+      condition: Optional[jnp.ndarray] = None,
+      **kwargs: Any,
+  ) -> jnp.ndarray:
+    
+    t_0 = 0.0
+    n = self.control_steps
+    dt = 1.0 / self.control_steps
+      
+    cost, result = self.inference(self.state, x)
     result = jax.lax.stop_gradient(result)
 
     x_seq = [TimedX(t=t_0, x=x)]

@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.datasets as datasets
 from scipy import linalg
+import jax
 from torch.utils.data import (
     ConcatDataset,
     DataLoader,
@@ -35,6 +36,12 @@ from torchvision.transforms import (
     Resize,
     ToTensor,
 )
+from tools import inception_torch
+
+def freeze(model):
+    for p in model.parameters():
+        p.requires_grad_(False)
+    model.eval()    
 
 
 def upsample(y, scale_factor=4):
@@ -91,6 +98,38 @@ def get_pushed_loader_stats(T, loader, inception_fn, inception_params, batch_siz
     mu, sigma = np.mean(pred_arr, axis=0), np.cov(pred_arr, rowvar=False)
     gc.collect()
     return mu, sigma
+
+@torch.no_grad()
+def get_pushed_loader_stats_torch(T, loader, batch_size=8, n_epochs=1, verbose=False, device='cuda',
+                            use_downloaded_weights=False, upgrade=False):
+    
+    dims = 2048
+    block_idx = inception_torch.InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+    model = inception_torch.InceptionV3([block_idx]).to("cuda:0")
+    freeze(model)
+
+    size = len(loader.dataset)
+    pred_arr = []
+    mse_arr = []
+    from time import time
+    
+    for epoch in range(n_epochs):
+        for step, X in tqdm(enumerate(loader)):
+            for i in range(0, len(X), batch_size):
+                start, end = i, min(i + batch_size, len(X))
+                img_size = X.shape[-1]
+                batch = T(
+                    X[start:end].numpy().reshape(end - start, 3 * img_size * img_size)
+                )[1][-1].x.reshape(end - start, 3, img_size, img_size)
+                batch = torch.from_numpy(jax.device_get((batch + 1) / 2)).type(torch.FloatTensor).to("cuda:0")
+                pred_arr.append(model(batch)[0].cpu().data.numpy().reshape(end-start, -1))
+
+    pred_arr = np.vstack(pred_arr)
+    mu, sigma = np.mean(pred_arr, axis=0), np.cov(pred_arr, rowvar=False)
+    gc.collect()
+    torch.cuda.empty_cache()
+    return mu, sigma
+
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     """Numpy implementation of the Frechet Distance.
