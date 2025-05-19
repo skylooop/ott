@@ -1,5 +1,7 @@
 import os
 
+from ott2.geometry import costs
+
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 os.environ['JAX_PLATFORM_NAME'] = 'gpu'
 NPROC = len(os.environ["CUDA_VISIBLE_DEVICES"].split(","))
@@ -163,21 +165,20 @@ class NeuralOC:
       elif not os.path.exists(load_dir):
         print(f"Path does not exist: {load_dir}")
       else:
-        with open(f"{load_dir}/opt_state_step_19000.pkl", "rb") as file:
-          opt_state = pickle.load(file)
-        with open(f"{load_dir}/params_step_19000.pkl", "rb") as file:
+        # with open(f"{load_dir}/opt_state_step_19000.pkl", "rb") as file:
+        #   opt_state = pickle.load(file)
+        with open(f"{load_dir}/params_step_5000.pkl", "rb") as file:
           params = pickle.load(file)
         # with open(f"{load_dir}/step_step_19000.pkl", "rb") as file:
-        step = 19000
-        self.state = self.state.replace(params=params, opt_state=opt_state, step=step)
-        self.target_state = self.target_state.replace(params=params, step=step)
+        # step = 19_000
+        self.state = self.state.replace(params=params)
+        self.target_state = self.target_state.replace(params=params)
         print("opt_state + params + step: loaded")
 
-
     self.buffer = TrajectoryBuffer(
-      capacity=50_000,
+      capacity=20_000,
       dim=input_dim,
-      batch_size=batch_size
+      batch_size=batch_size,
     )
     # if load_dir and os.path.exists(load_dir):
     #     with open(f"{load_dir}/buffer_state_latest.pkl", "rb") as file:
@@ -237,7 +238,7 @@ class NeuralOC:
         s_diff_1 = dsdt - 0.5 * (1 / self.cost_mult) * (u * u).sum(-1, keepdims=True) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
         s_diff_2 = vt - 0.5 * (1 / self.cost_mult) * (dsdx * dsdx).sum(-1, keepdims=True) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
         loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
-        # loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt).mean() * reg_weight
+        # loss += (dsdt - (dsdx * dsdx).sum(-1, keepdims=True) + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)).mean() 
 
         return loss
 
@@ -270,10 +271,41 @@ class NeuralOC:
         x_1_pred = jax.lax.stop_gradient(x_last)
 
         dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
-        # dual_loss = dual_loss.mean()
-        dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
+        dual_loss = dual_loss.mean()
+        # norm = jnp.abs(dual_loss.mean())
+        # scale = jnp.maximum(norm, 1.0)
+        # dual_loss = (dual_loss.mean() * scale)
+
+        def expectile_loss(diff: jnp.ndarray, expectile=0.98) -> jnp.ndarray:
+          weight = jnp.where(diff >= 0, expectile, (1 - expectile))
+          return weight * diff ** 2
         
-        return dual_loss * weight, result
+        # source, target = x_0, x_1
+        # target_hat_detach = x_1_pred
+        # batch_cost = lambda x, y: 0.5 * self.cost_mult * jax.vmap(costs.SqEuclidean())(jnp.atleast_2d(x), jnp.atleast_2d(y)).reshape(-1)
+        # g_target = -state.apply_fn(params, t_1, x_1, x_0 * 0).reshape(-1)
+        # g_star_source = batch_cost(source, target_hat_detach) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0).reshape(-1)
+
+        # diff_1 = jax.lax.stop_gradient(g_star_source - batch_cost(source, target)) + g_target
+        # reg_loss_1 = expectile_loss(diff_1).mean()
+        # diff_2 = jax.lax.stop_gradient(g_target - batch_cost(source, target)) + g_star_source
+        # reg_loss_2 = expectile_loss(diff_2).mean()
+
+        # reg_loss = (reg_loss_1 + reg_loss_2) * 1.0
+        bs = source.shape[0]
+        t_sample = self.time_sampler(key, bs)
+        x_t = self.flow.compute_xt(key, t_sample, x_1_pred, x_1)
+
+        ut1 = x_1 - x_t
+        ut = - dsdx_fn(params, t_1, x_t, x_t) * (1 / self.cost_mult)
+        reg_loss = ((ut - ut1) ** 2).mean()
+       
+        # dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
+        # dsdt, dsdx = dsdtdx_fn(params, t_1, x_t, x_t)
+        # s_diff = dsdt - 0.5 * (1 / self.cost_mult) * (dsdx * dsdx).sum(-1, keepdims=True) 
+        # reg_loss = (s_diff ** 2).mean()
+        
+        return dual_loss + reg_loss, result
 
       @with_mesh
       @jax.jit
@@ -291,7 +323,13 @@ class NeuralOC:
 
         g_norm_control = optax.global_norm(control_grads)
         g_norm_potential = optax.global_norm(potential_grads)
-        scale_update = g_norm_potential / g_norm_control
+        
+        g_norm_potential_old = g_norm_potential
+        g_norm_potential = jnp.minimum(g_norm_potential, 10.0)
+        gp_scale = g_norm_potential / g_norm_potential_old
+        potential_grads = jax.tree.map(lambda gp: gp * gp_scale, potential_grads)
+
+        scale_update = (g_norm_potential) / g_norm_control 
         scale_ema = scale_update * 0.1 + scale_ema * 0.9
 
         state = state.apply_gradients(
@@ -385,7 +423,7 @@ class NeuralOC:
         self.buffer.append(x=x_seq[rnd_index], t=t_seq[rnd_index])
 
 
-      if it % eval_every == 0 and callback is not None:
+      if it % eval_every == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
         
       if it % 5000 == 0 and it > 0 and save_dir is not None:

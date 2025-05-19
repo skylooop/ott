@@ -150,8 +150,8 @@ class ResNetDwTime(nn.Module):
 
         x = x.reshape(-1, self.nc, self.size, self.size)
 
-        t_pos = jnp.arange(1, 30) * t
-        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, 30), jnp.cos(t_pos) / jnp.arange(1, 30)], -1)
+        t_pos = jnp.arange(1, 10) * t
+        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, 10), jnp.cos(t_pos) / jnp.arange(1, 10)], -1)
 
         b = nn.Dense(self.size ** 2)(t_pos) # [b, size**2]
         b = b.reshape(b_size, 1, self.size, self.size)
@@ -328,12 +328,12 @@ noc = NeuralOC(
         # optax.clip(max_delta=1.),
         optax.adam(**CONFIG["optimizer"]),
     ),
-    control_steps=30,
+    control_steps=20,
     reg_weight=CONFIG["reg_weight"],
     control_weight=CONFIG["control_weight"],
     acc_weight=0.0,
     potential_weight=0.,
-    flow=LagrangianFlow(sigma=0.05, potential=potential),
+    flow=LagrangianFlow(sigma=0.01, potential=potential),
     key=GLOBAL_KEY,
     batch_size=batch_size,
     load_dir=SAVE_MODEL_DIR if args.load_model else None,
