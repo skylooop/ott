@@ -5,11 +5,11 @@ eval_every: 1000
 batch_size: 48
 n_training_iters: 500_000
 collect_buffer_iters: 1000
-update_potential_every: 1
+update_potential_every: 2
 
 # model params
 reg_weight: 0.
-control_weight: 0.7
+control_weight: 1.0
 
 # net
 n_layers: 5

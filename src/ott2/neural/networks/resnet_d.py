@@ -223,7 +223,7 @@ class ResNetBlock(nn.Module):
                                 strides=self.strides)(x)
         y = self.conv_block_cls(self.n_hidden, padding=[(1, 1), (1, 1)],
                                 is_last=True)(y)
-        return self.activation(y * 0.3 + skip_cls(self.strides)(x, y.shape))
+        return self.activation(y + skip_cls(self.strides)(x, y.shape))
 
 
 class ResNetBottleneckBlock(nn.Module):
@@ -400,7 +400,7 @@ class ResNet_D(nn.Module):
     nc: int = 3
     nfilter: int = 64
     nfilter_max: int = 512
-    activation = partial(nn.leaky_relu, negative_slope=0.2)
+    activation = partial(nn.leaky_relu, negative_slope=0.1)
    
     @nn.compact
     def __call__(self, x, train=True):

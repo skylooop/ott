@@ -218,13 +218,12 @@ class NeuralOC:
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
             grad_fun = jax.grad(lambda __x: state.apply_fn(p, t[None], __x[None], x0[None]).sum())
-    
             def hessian_diag(__x):
                 grad_val = jax.jvp(grad_fun, (__x,), (jnp.ones_like(__x),))[1]
                 return grad_val
-  
             trace = jnp.sum(hessian_diag(x))
             return trace
+        
         
         def normalize(x):
           norm = jnp.linalg.norm(x) + 1e-8
