@@ -184,6 +184,7 @@ class NeuralOC:
         s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
         loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
         # loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt).mean() * reg_weight
+        # loss += (dsdt - (dsdx * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)).mean()
 
         return loss
 
