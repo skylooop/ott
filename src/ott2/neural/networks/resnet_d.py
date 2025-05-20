@@ -20,11 +20,16 @@ ModuleDef = Callable[..., Callable]
 InitFn = Callable[[Any, Iterable[int], Any], Any]
 
 
+class CheckpointLayerNorm(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        return nn.remat(nn.RMSNorm)(name='ln', use_scale=False)(x)
+
 class ConvBlock(nn.Module):
     n_filters: int
     kernel_size: Tuple[int, int] = (3, 3)
     strides: Tuple[int, int] = (1, 1)
-    activation: Callable = partial(nn.leaky_relu, negative_slope=0.2)
+    activation: Callable = partial(nn.leaky_relu, negative_slope=0.1)
     padding: Union[str, Iterable[Tuple[int, int]]] = ((0, 0), (0, 0))
     is_last: bool = False
     groups: int = 1
@@ -32,7 +37,7 @@ class ConvBlock(nn.Module):
     bias_init: InitFn = nn.initializers.zeros
 
     conv_cls: ModuleDef = nn.Conv
-    norm_cls: Optional[ModuleDef] = partial(nn.BatchNorm, momentum=0.9)
+    norm_cls: Optional[ModuleDef] = CheckpointLayerNorm
 
     force_conv_bias: bool = False
 
@@ -49,10 +54,10 @@ class ConvBlock(nn.Module):
             bias_init=self.bias_init,
         )(x)
         if self.norm_cls:
-            scale_init = (nn.initializers.zeros
-                          if self.is_last else nn.initializers.ones)
-            mutable = self.is_mutable_collection('batch_stats')
-            x = self.norm_cls(use_running_average=not mutable, scale_init=scale_init)(x)
+            # scale_init = (nn.initializers.zeros
+            #               if self.is_last else nn.initializers.ones)
+            # mutable = self.is_mutable_collection('batch_stats')
+            x = self.norm_cls()(x)
 
         if not self.is_last:
             x = self.activation(x)
@@ -206,7 +211,7 @@ class ResNetBlock(nn.Module):
     n_hidden: int
     strides: Tuple[int, int] = (1, 1)
 
-    activation: Callable = partial(nn.leaky_relu, negative_slope=0.2)
+    activation: Callable = partial(nn.leaky_relu, negative_slope=0.1)
     conv_block_cls: ModuleDef = ConvBlock
     skip_cls: ModuleDef = ResNetSkipConnection
 
@@ -218,7 +223,7 @@ class ResNetBlock(nn.Module):
                                 strides=self.strides)(x)
         y = self.conv_block_cls(self.n_hidden, padding=[(1, 1), (1, 1)],
                                 is_last=True)(y)
-        return self.activation(y * 0.2 + skip_cls(self.strides)(x, y.shape))
+        return self.activation(y * 0.3 + skip_cls(self.strides)(x, y.shape))
 
 
 class ResNetBottleneckBlock(nn.Module):
@@ -411,8 +416,8 @@ class ResNet_D(nn.Module):
         nf0 = min(nf, nf_max)
         nf1 = min(nf * 2, nf_max)
         blocks = [
-            ResNetBlock(nf0, conv_block_cls=partial(ConvBlock, norm_cls=None)),
-            ResNetBlock(nf1, conv_block_cls=partial(ConvBlock, norm_cls=None))
+            ResNetBlock(nf0, conv_block_cls=partial(ConvBlock, norm_cls=CheckpointLayerNorm)),
+            ResNetBlock(nf1, conv_block_cls=partial(ConvBlock, norm_cls=CheckpointLayerNorm))
         ]
 
         for i in range(1, self.nlayers+1):
@@ -420,15 +425,15 @@ class ResNet_D(nn.Module):
             nf1 = min(nf * 2**(i+1), nf_max)
             blocks += [
                 partial(nn.avg_pool, window_shape=(3, 3), strides=(2, 2), padding=[(1, 1), (1, 1)]),
-                ResNetBlock(nf0, conv_block_cls=partial(ConvBlock, norm_cls=None)),
-                ResNetBlock(nf1, conv_block_cls=partial(ConvBlock, norm_cls=None)),
+                ResNetBlock(nf0, conv_block_cls=partial(ConvBlock, norm_cls=CheckpointLayerNorm)),
+                ResNetBlock(nf1, conv_block_cls=partial(ConvBlock, norm_cls=CheckpointLayerNorm)),
             ]
 
         batch_size = x.shape[0]
 
         out = nn.leaky_relu(
             nn.Conv(nf, (3, 3), padding=[(1, 1), (1, 1)])(x),
-            0.2
+            0.1
         )
 
         for block in blocks:

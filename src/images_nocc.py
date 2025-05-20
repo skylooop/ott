@@ -1,7 +1,7 @@
 import os
 
 # CUDA_VISIBLE_DEVICES = "0,1,2,3,4,5,6,7"
-CUDA_VISIBLE_DEVICES = "0,1"
+CUDA_VISIBLE_DEVICES = "2,3,4,7"
 # CUDA_VISIBLE_DEVICES = "0"
 os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
 
@@ -10,7 +10,7 @@ os.environ['JAX_PLATFORM_NAME'] = 'gpu'
 
 import sys
 
-sys.path.insert(0, "/home/nazar/projects/hota_images/src")
+sys.path.insert(0, "/home/jovyan/nazar/hota_image/src")
 
 import warnings
 
@@ -53,7 +53,7 @@ from IPython.display import clear_output
 
 from ott2.neural.methods.flows.dynamics import LagrangianFlow
 from ott2.neural.methods.nocc import NeuralOC
-from ott2.neural.networks.resnet_d import ResNet_D
+from ott2.neural.networks.resnet_d import ResNet_D, ConvBlock
 import torch, gc
 gc.collect()
 torch.cuda.empty_cache()
@@ -142,16 +142,18 @@ class ResNetDwTime(nn.Module):
     nc: int = 3
     nfilter: int = 100
     nfilter_max: int = 512
+    conv_block_cls= ConvBlock
 
 
     @nn.compact
     def __call__(self, t, x, train=True):
         b_size = t.shape[0]
+        D = self.size
 
         x = x.reshape(-1, self.nc, self.size, self.size)
 
-        t_pos = jnp.arange(1, 30) * t
-        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, 30), jnp.cos(t_pos) / jnp.arange(1, 30)], -1)
+        t_pos = jnp.arange(1, 20) * t
+        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, 20), jnp.cos(t_pos) / jnp.arange(1, 20)], -1)
 
         b = nn.Dense(self.size ** 2)(t_pos) # [b, size**2]
         b = b.reshape(b_size, 1, self.size, self.size)
@@ -185,7 +187,7 @@ img_size, nc = 64, 3
 test_ratio = 0.1
 
 ## anime dataset
-path = "/home/nazar/projects/aligned_anime_faces"
+path = "/home/jovyan/nazar/aligned_anime_faces"
 transform = Compose([Resize((img_size, img_size)), ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 anime_dataset = MyImageFolder(path, transform=transform)
 
@@ -197,8 +199,8 @@ train_anime_dataset = Subset(anime_dataset, train_idx)
 test_anime_dataset = Subset(anime_dataset, test_idx)
 
 ## celeba female dataset
-path = "/home/nazar/projects/celeba_female"
-attrs_path = "/home/nazar/projects/list_attr_celeba.txt" 
+path = "/home/jovyan/nazar/celeba_female"
+attrs_path = "/home/jovyan/nazar/list_attr_celeba.txt" 
 transform = Compose([Resize((img_size, img_size)), ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 celeba_female_dataset = MyImageFolder(path, transform=transform)
 
@@ -244,8 +246,8 @@ rng = jax.random.PRNGKey(0)
 inception_params = inception_net.init(rng, jnp.ones((1, 299, 299, 3))) # TODO: WHY?
 inception_apply = jax.jit(functools.partial(inception_net.apply, train=False))
 
-mu_path = "/home/nazar/projects/hota_images/src/experiments/mu_data.npy"
-sigma_path = "/home/nazar/projects/hota_images/src/experiments/sigma_data.npy"
+mu_path = "/home/jovyan/nazar/hota_image/src/experiments/mu_data.npy"
+sigma_path = "/home/jovyan/nazar/hota_image/src/experiments/sigma_data.npy"
 if not os.path.exists(mu_path) or not os.path.exists(sigma_path):
     test_anime_loader = DataLoader(
         test_anime_dataset,
@@ -328,7 +330,7 @@ noc = NeuralOC(
         # optax.clip(max_delta=1.),
         optax.adam(**CONFIG["optimizer"]),
     ),
-    control_steps=30,
+    control_steps=20,
     reg_weight=CONFIG["reg_weight"],
     control_weight=CONFIG["control_weight"],
     acc_weight=0.0,

@@ -148,6 +148,7 @@ class NeuralOC:
         jnp.ones([1, input_dim]), 
         jnp.ones([1, input_dim])
       )
+      print("keys", params.keys())
       self.state = train_state.TrainState.create(
         apply_fn=value_model.apply,
         params=params,
@@ -209,10 +210,21 @@ class NeuralOC:
         # x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2
         # U_t = 0.4 * self.flow.compute_potential(t, x_t) + 0.3 * self.flow.compute_potential(t+dt, x_dt) + 0.3 * self.flow.compute_potential(t+dt*2, x_2dt)
 
+        # @partial(jax.vmap, in_axes=(None, 0, 0, 0))
+        # def laplacian(p, t, x, x0):
+        #     fun = lambda __x: state.apply_fn(p,t[None],__x[None],x0[None]).sum()
+        #     return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
+        
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
-            fun = lambda __x: state.apply_fn(p,t[None],__x[None],x0[None]).sum()
-            return jnp.trace(jax.jacfwd(jax.jacrev(fun))(x))
+            grad_fun = jax.grad(lambda __x: state.apply_fn(p, t[None], __x[None], x0[None]).sum())
+    
+            def hessian_diag(__x):
+                grad_val = jax.jvp(grad_fun, (__x,), (jnp.ones_like(__x),))[1]
+                return grad_val
+  
+            trace = jnp.sum(hessian_diag(x))
+            return trace
         
         def normalize(x):
           norm = jnp.linalg.norm(x) + 1e-8
@@ -270,8 +282,8 @@ class NeuralOC:
         x_1_pred = jax.lax.stop_gradient(x_last)
 
         dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
-        # dual_loss = dual_loss.mean()
-        dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
+        dual_loss = dual_loss.mean()
+        # dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
         
         return dual_loss * weight, result
 
@@ -385,11 +397,11 @@ class NeuralOC:
         self.buffer.append(x=x_seq[rnd_index], t=t_seq[rnd_index])
 
 
-      if it % eval_every == 0 and callback is not None:
+      if it % eval_every == 0 and it > 0 and callback is not None:
         callback(it, training_logs, self.transport)
         
-      if it % 5000 == 0 and it > 0 and save_dir is not None:
-          self.save(save_dir, it=it)
+      # if it % 5000 == 0 and it > 0 and save_dir is not None:
+      #     self.save(save_dir, it=it)
 
       it += 1
 
