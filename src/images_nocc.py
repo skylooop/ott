@@ -1,7 +1,7 @@
 import os
 
 # CUDA_VISIBLE_DEVICES = "0,1,2,3,4,5,6,7"
-CUDA_VISIBLE_DEVICES = "2,3,4,7"
+CUDA_VISIBLE_DEVICES = "2,3"
 # CUDA_VISIBLE_DEVICES = "0"
 os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
 
@@ -138,7 +138,7 @@ class MyImageFolder(ImageFolder):
 
 class ResNetDwTime(nn.Module):
     size: int = 64 
-    nlayers: int = 4
+    nlayers: int = CONFIG["n_layers"]
     nc: int = 3
     nfilter: int = 100
     nfilter_max: int = 512
@@ -152,8 +152,9 @@ class ResNetDwTime(nn.Module):
 
         x = x.reshape(-1, self.nc, self.size, self.size)
 
-        t_pos = jnp.arange(1, 20) * t
-        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, 20), jnp.cos(t_pos) / jnp.arange(1, 20)], -1)
+        ntf = CONFIG["n_time_freq"]
+        t_pos = jnp.arange(1, ntf) * t
+        t_pos = jnp.concatenate([jnp.sin(t_pos) / jnp.arange(1, ntf), jnp.cos(t_pos) / jnp.arange(1, ntf)], -1)
 
         b = nn.Dense(self.size ** 2)(t_pos) # [b, size**2]
         b = b.reshape(b_size, 1, self.size, self.size)
@@ -330,27 +331,30 @@ noc = NeuralOC(
         # optax.clip(max_delta=1.),
         optax.adam(**CONFIG["optimizer"]),
     ),
-    control_steps=20,
-    reg_weight=CONFIG["reg_weight"],
+    control_steps=CONFIG["control_steps"],
+    cost_mult = CONFIG["cost_mult"],
+    backward_batch_size = CONFIG["backward_batch_size"], 
+    use_dual_abs_mult = CONFIG["use_dual_abs_mult"],
     control_weight=CONFIG["control_weight"],
-    acc_weight=0.0,
-    potential_weight=0.,
-    flow=LagrangianFlow(sigma=0.05, potential=potential),
+    potential_weight=CONFIG["potential_weight"],
+    flow=LagrangianFlow(sigma=CONFIG["sigma"], potential=potential),
     key=GLOBAL_KEY,
-    batch_size=batch_size,
     load_dir=SAVE_MODEL_DIR if args.load_model else None,
 )
 
 logs = noc(
     potential_data_loader,
     n_iters=num_iterations,
+    collect_buffer_iters = collect_buffer_iters,
+    buffer_update_size = CONFIG["buffer_update_size"],
+    update_potential_every=update_potential_every,
+    buffer_size=CONFIG["buffer_size"],
     rng=GLOBAL_KEY,
     callback=callback,
-    collect_buffer_iters=collect_buffer_iters,
-    update_potential_every=update_potential_every,
     eval_every=eval_every,
     save_dir=SAVE_MODEL_DIR,
 )
+
 
 with open(f"{SAVE_DIR}/logs.json", 'w') as f:
     json.dump(logs, f)

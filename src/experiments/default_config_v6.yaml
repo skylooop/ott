@@ -2,19 +2,27 @@
 eval_every: 1000
 
 # train init process
-batch_size: 48
+batch_size: 32
 n_training_iters: 500_000
 collect_buffer_iters: 1000
 update_potential_every: 2
+buffer_update_size: 1
+buffer_size: 50_000
+use_dual_abs_mult: False
+backward_batch_size: 3
 
 # model params
-reg_weight: 0.
 control_weight: 1.0
+potential_weight: 0
+cost_mult: 0.0002
+control_steps: 30
+sigma: 0.01
 
 # net
-n_layers: 5
+n_layers: 4
+n_time_freq: 20
 
 optimizer:
-  learning_rate: 5e-5
+  learning_rate: 1e-4
   b1: 0.5
   b2: 0.5

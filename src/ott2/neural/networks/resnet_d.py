@@ -223,7 +223,7 @@ class ResNetBlock(nn.Module):
                                 strides=self.strides)(x)
         y = self.conv_block_cls(self.n_hidden, padding=[(1, 1), (1, 1)],
                                 is_last=True)(y)
-        return self.activation(y + skip_cls(self.strides)(x, y.shape))
+        return self.activation(y * 0.3 + skip_cls(self.strides)(x, y.shape))
 
 
 class ResNetBottleneckBlock(nn.Module):
@@ -296,7 +296,7 @@ class ResNeStBottleneckBlock(ResNetBottleneckBlock):
                                 kernel_size=(1, 1),
                                 is_last=True)(y)
 
-        return self.activation(y + skip_cls(self.strides)(x, y.shape))
+        return self.activation(y * 0.5 + skip_cls(self.strides)(x, y.shape))
 
 
 def ResNet(
