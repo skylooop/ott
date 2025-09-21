@@ -270,9 +270,7 @@ def create_sphere_ds(dim: int, sigma: float, batch_size: int, key):
     src_sample /= np.linalg.norm(src_sample, axis=-1, keepdims=True)
 
     trg_sample = jax.random.normal(trg_key, (batch_size, dim)) * sigma + trg_base
-    # trg_sample *= np.asarray([1, 1, 0])[np.newaxis, ]
     trg_sample /= np.linalg.norm(trg_sample, axis=-1, keepdims=True)
-    # trg_sample = trg_sample + jax.random.normal(trg_key_2, (batch_size, dim)) * 0.02
 
     yield {
       "src_lin": src_sample,

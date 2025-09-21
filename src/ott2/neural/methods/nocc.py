@@ -54,6 +54,7 @@ class NeuralOC:
       reg_weight: float,
       acc_weight: float,
       pretrain_steps: float = 5_000,
+      cost_mult: float = 1.0,
       time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
       key:Optional[jax.Array] = None,
       **kwargs: Any,
@@ -66,6 +67,7 @@ class NeuralOC:
     self.reg_weight = reg_weight
     self.acc_weight = acc_weight
     self.pretrain_steps = pretrain_steps
+    self.cost_mult = cost_mult
    
     key, init_key = jax.random.split(key, 2)
     params = value_model.init(
@@ -143,6 +145,7 @@ class NeuralOC:
         x_t = x_sample
         t = t_sample.reshape(-1, 1)
         At_T = self.flow.compute_inverse_control_matrix(t, x_t).transpose()
+        
 
         dsdtdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=[1,2])
 
@@ -152,9 +155,10 @@ class NeuralOC:
         vt = dsdt_tgt
 
         dt = 1.0 / 100
-        x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt
-        x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2
+        x_dt = x_t - jax.lax.stop_gradient(dsdx) * dt * (1 / self.cost_mult)
+        x_2dt = x_t - jax.lax.stop_gradient(dsdx) * dt * 2 * (1 / self.cost_mult)
         U_t = 0.4 * self.flow.compute_potential(t, x_t) + 0.3 * self.flow.compute_potential(t+dt, x_dt) + 0.3 * self.flow.compute_potential(t+dt*2, x_2dt)
+        U_t = U_t * self.cost_mult
 
         @partial(jax.vmap, in_axes=(None, 0, 0, 0))
         def laplacian(p, t, x, x0):
@@ -171,19 +175,22 @@ class NeuralOC:
             dsdx_fn = jax.grad(fun, argnums=1)
             norm_rev = lambda __t, __x: normalize(jax.jacrev(fun, 1)(__t, __x))
             Dt, Dx = jax.jacfwd(norm_rev, argnums=[0, 1])(t, x)
-            acc = Dt.squeeze() - Dx @ dsdx_fn(t, x)
+            acc = Dt.squeeze() - Dx @ dsdx_fn(t, x) * (1 / self.cost_mult)
             return acc
         
-        a = acceleration(params, t, x_t, x_t)
+        # a = acceleration(params, t, x_t, x_t)
         # a_tgt = acceleration(target_state.params, t, x_t, x_t)
         # a_cost_tgt = jnp.sqrt((a_tgt * a_tgt).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True)) * self.acc_weight
-        a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-8) * self.acc_weight
+        # a_cost = jnp.sqrt((a * a).reshape(x_t.shape[0], x_t.shape[1]).sum(-1, keepdims=True) + 1e-8) * self.acc_weight
+        a_cost = 0
 
         D = (0.5 * self.flow.compute_sigma_t(t) ** 2).reshape(-1, 1)
-        s_diff_1 = dsdt - 0.5 * ((u @ At_T) * u).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
-        s_diff_2 = vt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
-        loss = jnp.abs(s_diff_1 ** 2).mean() + jnp.abs(s_diff_2 ** 2).mean()
-        # loss += (- dsdt + 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + a_cost_tgt).mean() * reg_weight
+        s_diff_1 = dsdt - 0.5 * (1 / self.cost_mult) * ((u @ At_T) * u).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(state.params, t, x_t, x_t).reshape(-1, 1)
+        s_diff_2 = vt - 0.5 * (1 / self.cost_mult) * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
+        
+        # s_diff = dsdt - 0.5 * ((dsdx @ At_T) * dsdx).sum(-1, keepdims=True) + self.potential_weight * U_t.reshape(-1, 1) + a_cost + D * laplacian(params, t, x_t, x_t).reshape(-1, 1)
+        
+        loss = (s_diff_1 ** 2).mean() + (s_diff_2 ** 2).mean() 
 
         return loss
 
@@ -200,7 +207,7 @@ class NeuralOC:
           dsdx = dsdx_fn(state.params, t_, x_, x_0)
           sigma = self.flow.compute_sigma_t(t_)
           key_, key_s = jax.random.split(key_)
-          x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+          x_next = x_ - dt * dsdx * (1 / self.cost_mult) + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
           t_next = t_ + dt
 
           # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
@@ -217,6 +224,7 @@ class NeuralOC:
 
         dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
         dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
+        # dual_loss = dual_loss.mean() 
         
         return dual_loss * weight, result
 
@@ -230,7 +238,6 @@ class NeuralOC:
 
         g_norm_control = optax.global_norm(control_grads)
         g_norm_potential = optax.global_norm(potential_grads)
-        # scale = jnp.clip(g_norm_potential / g_norm_control, min=0.01, max=10)
         scale_update = g_norm_potential / g_norm_control
         scale = scale_update * 0.1 + scale * 0.9
 
@@ -332,7 +339,7 @@ class NeuralOC:
                           "g_norm": g_norm, 
                           "g_norm_potential": g_norm_potential})
 
-      if it % 5_000 == 0 and it > 0 and callback is not None:
+      if it % 5_000 == 0 and callback is not None:
         callback(it, training_logs, self.transport)
       
       it += 1
@@ -359,7 +366,7 @@ class NeuralOC:
         U_t = self.flow.compute_potential(t_, x_)
         sigma = self.flow.compute_sigma_t(t_)
         key_, key_s = jax.random.split(key_)
-        x_ = x_ - dt * u + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+        x_ = x_ - dt * u * (1 / self.cost_mult) + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
         t_ = t_ + dt
         # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
         # x_pred = x_ - dt * u + sigma * noise
@@ -368,7 +375,7 @@ class NeuralOC:
         # x_ = x_ - dt * 0.5 * (u + u_corr) + sigma * noise  # Same noise for both steps
         # t_ = t_ + dt
 
-        cost += 0.5 * (u * u).sum(-1).mean() * dt + U_t.mean() * dt 
+        cost += 0.5 * (1 / self.cost_mult) * (u * u).sum(-1).mean() * dt + U_t.mean() * dt * self.cost_mult * 10
         return (t_, x_, cost, key_), x_
           
       (_, _, cost, _), result = jax.lax.scan(move, (t_0, x_0, 0.0, loop_key), None, length=n)
@@ -398,60 +405,3 @@ class NeuralOC:
       
     return cost, x_seq
   
-
-  def transport2(
-      self,
-      x: jnp.ndarray,
-      condition: Optional[jnp.ndarray] = None,
-      **kwargs: Any,
-  ) -> jnp.ndarray:
-    
-    dt = 1.0 / 30
-    # t_0 = 0.0
-    n = 30
-    loop_key = jax.random.PRNGKey(0)
-    
-    def solve_ode(state, x):
-
-      def vector_field(t, y, args):
-        dsdx_fn, key_s = args
-        u = dsdx_fn(state.params, jnp.array(t)[None], y, y)
-        return -u
-        # sigma = self.flow.compute_sigma_t(t)
-        # it = (t.squeeze() * 1000).astype(int)
-        # it_key = jax.random.fold_in(key_s, it)
-        # return -u + sigma * jax.random.normal(it_key, shape=x.shape)
-
-      dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
-      ode_term = diffrax.ODETerm(vector_field)
-
-      def diffusion(t, y, args):
-        s = self.flow.compute_sigma_t(t)
-        diagonal = jnp.array([s, s])
-        return lx.DiagonalLinearOperator(diagonal)
-      
-      brownian_motion = diffrax.VirtualBrownianTree(0.0, 1.0, tol=1e-5, shape=x.shape, key=loop_key)
-      terms = diffrax.MultiTerm(ode_term, diffrax.ControlTerm(diffusion, brownian_motion))
-      saveat = diffrax.SaveAt(ts=jnp.linspace(0, 1, n))
-      
-      result = diffrax.diffeqsolve(
-          terms,
-          t0=0,
-          t1=1,
-          y0=x,
-          args=(dsdx_fn, loop_key),
-          solver=diffrax.Tsit5(),
-          dt0=dt,
-          saveat=saveat,
-          # stepsize_controller = diffrax.PIDController(rtol=1e-4, atol=1e-4)
-          **kwargs,
-      )
-      return result.ts, result.ys
-      
-    result_ts, result_ys = jax.jit(jax.vmap(solve_ode, in_axes=(None, 0)))(self.state, x)
-    x_seq = []
-
-    for i in range(result_ts.shape[1]):
-      x_seq.append(TimedX(t=result_ts[:, i], x=result_ys[:, i]))
-      
-    return 0.0, x_seq
