@@ -196,7 +196,7 @@ class NeuralOC:
 
         dsdx_fn = jax.grad(lambda p, t, x, x0: state.apply_fn(p,t,x,x0).sum(), argnums=2)
 
-        def move(carry, _):
+        def move_fwd(carry, _):
           t_, x_, key_ = carry
           dsdx = dsdx_fn(state.params, t_, x_, x_0)
           sigma = self.flow.compute_sigma_t(t_)
@@ -204,21 +204,46 @@ class NeuralOC:
           x_next = x_ - dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
           t_next = t_ + dt
 
-          # noise = jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
-          # x_pred = x_ - dt * dsdx + sigma * noise
-          # # Corrector step (Heun's method)
-          # u_corr = dsdx_fn(state.params, t_ + dt, x_pred, x_0)
-          # x_next = x_ - dt * 0.5 * (dsdx + u_corr) + sigma * noise  # Same noise for both steps
-          # t_next = t_ + dt
+          return (t_next, x_next, key_), TimedX(t_, x_)
+        
+        def move_back(carry, _):
+          t_, x_, key_ = carry
+          dsdx = dsdx_fn(state.params, t_, x_, x_0)
+          sigma = self.flow.compute_sigma_t(t_)
+          key_, key_s = jax.random.split(key_)
+          x_next = x_ + dt * dsdx + sigma * jax.random.normal(key_s, shape=x_.shape) * jnp.sqrt(dt)
+          t_next = t_ - dt
 
           return (t_next, x_next, key_), TimedX(t_, x_)
         
-        (_, x_last ,_), result = jax.lax.scan(move, (t_0, x_0, key), None, length=steps_count)
-        x_1_pred = jax.lax.stop_gradient(x_last)
+        _, result_fwd = jax.lax.scan(move_fwd, (t_0, x_0, key), None, length=steps_count+1)
+        # x_1_pred = jax.lax.stop_gradient(result_fwd.x[-1])
 
-        dual_loss = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
-        dual_loss = (dual_loss.mean() * jnp.abs(dual_loss.mean()))
+        # dual_loss_1 = - (-state.apply_fn(params, t_1, x_1, x_0 * 0) + state.apply_fn(params, t_1, x_1_pred, x_0 * 0))
+        # dual_loss = dual_loss.mean()
         
+        # (_, x_1_pred,_), result_fwd = jax.lax.scan(move_fwd, (t_0, x_0, key), None, length=steps_count)
+        key, key_back = jax.random.split(key)
+        _, result_back = jax.lax.scan(move_back, (t_1, x_1, key_back), None, length=steps_count+1)
+
+        t_index = jax.random.randint(key, (), 0, steps_count+1)
+        t_dual = result_fwd.t[t_index]
+        x_fwd = jax.lax.stop_gradient(result_fwd.x[t_index])
+        # x_1_pred = jax.lax.stop_gradient(result_fwd.x[-1])
+        x_back = jax.lax.stop_gradient(result_back.x[steps_count - t_index])
+
+        # x_1_pred = jax.lax.stop_gradient(x_1_pred)
+        
+        dual_loss_t = - (-state.apply_fn(params, t_dual, x_back, x_0 * 0) + state.apply_fn(params, t_dual, x_fwd, x_0 * 0))
+        # dual_loss_1 = - (-state.apply_fn(params, t_1, x_1_pred, x_0 * 0) + state.apply_fn(params, t_1, x_1, x_0 * 0))
+        dual_loss = (dual_loss_t).mean()
+
+        result = TimedX(
+          t = jnp.concatenate([result_fwd.t, result_back.t], axis=0),
+          x = jnp.concatenate([result_fwd.x, result_back.x], axis=0)
+        )
+        # result = result_fwd
+
         return dual_loss * weight, result
 
       @jax.jit
