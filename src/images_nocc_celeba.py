@@ -199,8 +199,8 @@ with open(attrs_path, 'r') as f:
     lines = f.readlines()[1:]
     
 # Get male and female indices
-female_idx = [i for i, line in enumerate(lines) if len((parts := line.strip().split())) >= 41 and parts[20] == '-1']
-male_idx = [i for i, line in enumerate(lines) if len((parts := line.strip().split())) >= 41 and parts[20] == '1']
+female_idx = [i for i in list(range(len(lines))) if lines[i].replace('  ', ' ').split(' ')[21] == '-1']
+male_idx = [i for i in list(range(len(lines))) if lines[i].replace('  ', ' ').split(' ')[21] == '1']
 
 print(f"Found {len(female_idx)} female images, {len(male_idx)} male images")
 print("Total celeba images:", len(celeba_dataset))
@@ -352,7 +352,7 @@ noc = NeuralOC(
     input_dim=nc*img_size**2,
     value_model=net,
     optimizer=optax.chain(
-        # optax.clip(max_delta=1.),
+        optax.clip(max_delta=1.),
         optax.adam(**CONFIG["optimizer"]),
     ),
     control_steps=CONFIG["control_steps"],
